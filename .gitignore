@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# pytest
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data / model artifacts (should never be committed)
+*.sqlite
+*.sqlite3
+*.db
+*.safetensors
+*.bin
+checkpoint-*/
+*.jsonl
+
+# Environment secrets, if you add any later (API keys, tokens)
+.env
