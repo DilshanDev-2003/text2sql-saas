@@ -1,3 +1,5 @@
+from semantic_layer import inject_semantic_terms
+
 def format_schema(schema_row):
     return (
         f"{schema_row['Schema (values (type))']}\n"
@@ -9,8 +11,13 @@ def generate_sql(model, tokenizer, question, db_id, schema_lookup, do_sample=Fal
     schema_row = schema_lookup[db_id]
     schema_str = format_schema(schema_row)
 
-    prompt = f"Schema:\n{schema_str}\n\nQuestion: {question}\nSQL:"
+    semantic_context = inject_semantic_terms(question, db_id)
 
+    prompt = f"Schema:\n{schema_str}\n"
+    if semantic_context:    
+       prompt += f"\n{semantic_context}\n"
+    prompt += f"\nQuestion: {question}\nSQL:"
+       
     messages = [{"role": "user", "content": prompt}]
     inputs = tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, return_tensors="pt", return_dict=True

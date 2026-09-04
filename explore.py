@@ -61,7 +61,7 @@ ambiguous_test = "SELECT Stadium_ID FROM stadium JOIN concert ON stadium.Stadium
 
 is_valid, problems = validate_sql(ambiguous_test, "concert_singer", fake_schema_lookup)
 print("VALID:", is_valid, "PROBLEMS:", problems)   
-"""
+
 
 # explore.py or a fresh test file
 from schema_validation import validate_sql, parse_schema_string
@@ -70,3 +70,43 @@ from model_utils import generate_sql, format_schema
 from inference import generate_sql_query_with_retry, generate_sql_final, generate_candidates, voting_candidates, is_reasonable_query
 
 print("all imports OK")
+
+# --- SEMANTIC LAYER ---
+from semantic_layer import find_relevant_terms
+
+result = find_relevant_terms("Who are the high performer singers?", "concert_singer")
+print(result)
+
+result2 = find_relevant_terms("What is the average age?", "concert_singer")
+print(result2)
+# -----------------------------------------------
+question = "Who are the high performer singers?"
+term = "high performer"
+print(term.lower() in question.lower())
+# -----------------------------------------------
+from semantic_layer import SEMANTIC_TERMS
+db_id = "concert_singer"
+question = "Who are the high performer singers?"
+
+terms_for_db = SEMANTIC_TERMS.get(db_id, {})
+print("terms_for_db:", terms_for_db)
+
+question_lower = question.lower()
+print("question_lower:", question_lower)
+
+for term, meaning in terms_for_db.items():
+    print("checking term:", repr(term), "-> lower:", repr(term.lower()))
+    print("is it in question?", term.lower() in question_lower)
+
+from semantic_layer import find_relevant_terms
+
+result = find_relevant_terms("Who are the high performer singers?", "concert_singer")
+print(result)
+"""
+from semantic_layer import inject_semantic_terms
+
+context = inject_semantic_terms("Who are the high performer singers?", "concert_singer")
+print(context)
+
+context2 = inject_semantic_terms("What is the average age?", "concert_singer")
+print(repr(context2))

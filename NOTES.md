@@ -87,6 +87,24 @@ Instead of always taking the model's greedy (single best-guess) output, added re
 
 **Decision: kept checkpoint-270** — real logic-level improvement on the targeted patterns, no clear evidence of broad harm, even though the aggregate number didn't move much. Lesson: a small, narrow contrastive dataset can teach a real pattern without moving the aggregate number, because it's a small fraction of the overall failure surface.
 
+## Fine-tuning Phase — Closed Out
+
+Final checkpoint comparison:
+
+| Approach | Accuracy | Sample size |
+|---|---|---|
+| checkpoint-122 (baseline, retry only) | 70.67% (106/150) | 150 |
+| checkpoint-270 (+ contrastive data, retry only) | 71.33% (107/150) | 150 |
+| checkpoint-270 + schema validation + majority voting | 72.00% (36/50) | 50 |
+
+**Decision, final:** Using checkpoint-270 going forward.
+- Schema validation: always on — cheap, catches real hallucinations
+  (confirmed repeatedly in eval logs), no meaningful downside.
+- Majority voting: optional — small accuracy gain (71.33% -> 72.00%,
+  though on a smaller sample so not a high-confidence result), but
+  costs more compute per query (multiple generations vs one). Use
+  when accuracy matters more than latency/cost; skip otherwise.
+
 **Colab reliability issues hit during this phase:**
 - `ImportError: bitsandbytes` after a session restart — needed reinstalling and a full runtime restart (not just re-running `pip install`) for the package to register properly.
 - `FileNotFoundError` on the just-created checkpoint folder — turned out to be a Google Drive sync delay, not a real loss; the folder existed, `os.listdir` just hadn't caught up yet.
@@ -187,3 +205,43 @@ schema_validation.py   db_runner.py   model_utils.py
 - **Save expensive-to-regenerate results to disk immediately, and checkpoint long-running loops incrementally.** Free-tier compute environments can and will interrupt you without warning.
 - **A small, narrow fix to training data can teach a real pattern without moving the aggregate number** — check targeted before/after comparisons, not just the overall score.
 - **Explain every "why this tool/approach over that one" choice at the time it's made** — it's cheap to do in the moment and expensive to reconstruct later.
+
+## Semantic Layer — In Progress
+
+Built (semantic_layer.py, no GPU needed, both tested working):
+- find_relevant_terms(question, db_id) — detects known business terms
+  in a question via substring match against SEMANTIC_TERMS dict
+- inject_semantic_context(question, db_id) — formats matched terms
+  into a prompt-ready text block, empty string if nothing matched
+
+Wired into model_utils.py's generate_sql() (Step 3) — code written,
+NOT YET VERIFIED, needs GPU/Colab access to confirm the model actually
+uses the injected definitions correctly. Currently using one invented
+example term ("high performer" -> Age < 30 AND country = 'France')
+in the concert_singer schema, purely for testing the mechanism —
+not a real business need yet (no real customer data/questions to
+draw from).
+
+Next when Colab available: run generate_sql with a question containing
+"high performer" and confirm the generated SQL actually reflects
+the injected definition rather than hallucinating.
+
+## Semantic Layer — Complete
+
+Built and fully verified (semantic_layer.py + model_utils.py integration):
+- find_relevant_terms(question, db_id) — detects known business terms
+- inject_semantic_context(question, db_id) — formats matched terms
+  into a prompt-ready text block
+- Wired into generate_sql() in model_utils.py
+
+Verified in Colab with an invented example term ("high performer" ->
+Age < 30 AND country = 'France' in concert_singer schema):
+- Question containing the term correctly generated SQL reflecting
+  the injected definition
+- Question NOT containing the term generated normal, unaffected SQL
+  (confirms the empty-context guard works, no leakage)
+
+Current limitation: SEMANTIC_TERMS is a hardcoded example dict, not
+real business terminology — built to verify the mechanism, not
+because a real need has appeared yet. Expand with real terms if/when
+actual user questions surface jargon the schema doesn't cover.

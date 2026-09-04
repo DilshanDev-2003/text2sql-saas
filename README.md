@@ -8,10 +8,11 @@ Actively in development. Core generation pipeline (fine-tuned model + schema val
 
 ## How it works
 
-1. A question + database schema go into the fine-tuned model, which generates candidate SQL.
-2. Each candidate is checked against the real schema (`schema_validation.py`) — catches hallucinated column/table names before ever touching a database.
-3. Surviving candidates are executed against the database (`db_runner.py`), with a timeout guard against runaway queries.
-4. If multiple candidates were generated, the most self-consistent answer wins — the SQL whose *result* the most candidates agree on, not just the first one that happened to run (`inference.py`).
+1. A question + database schema go into the fine-tuned model. If the question uses a known business term (e.g., domain-specific jargon not present in the schema), its real SQL meaning is injected into the prompt first (`semantic_layer.py`).
+2. The model generates candidate SQL.
+3. Each candidate is checked against the real schema (`schema_validation.py`) — catches hallucinated column/table names before ever touching a database.
+4. Surviving candidates are executed against the database (`db_runner.py`), with a timeout guard against runaway queries.
+5. If multiple candidates were generated, the most self-consistent answer wins — the SQL whose *result* the most candidates agree on, not just the first one that happened to run (`inference.py`).
 
 ## Project structure
 
@@ -20,6 +21,7 @@ Actively in development. Core generation pipeline (fine-tuned model + schema val
 | `schema_validation.py` | Checks if generated SQL only references real tables/columns. No model or database needed. |
 | `db_runner.py` | Executes SQL against a SQLite file safely, with a timeout; compares two queries' results. |
 | `model_utils.py` | Talks to the fine-tuned model — prompt formatting and generation only. |
+| `semantic_layer.py` | Maps business terminology to real SQL logic, so questions using jargon the schema doesn't cover still resolve correctly. |
 | `inference.py` | Combines the above into full generation strategies (first-valid-wins retry, and generate-many-then-vote). |
 
 Model training and full evaluation runs live in a separate Colab notebook (GPU required); the modules above are local, GPU-free application code.
@@ -67,7 +69,7 @@ Being built incrementally, driven by actual need rather than upfront completenes
 - [x] Execution-accuracy evaluation harness
 - [x] Schema validation (pre-execution hallucination guard)
 - [x] Self-consistency (majority-vote) generation
-- [ ] Semantic layer (business terminology → SQL mapping)
+- [x] Semantic layer (business terminology → SQL mapping)
 - [ ] RAG-based schema retrieval (for schemas too large to fit in one prompt)
 - [ ] Multi-dialect SQL support (Postgres, Snowflake, BigQuery)
 - [ ] Production hardening (multi-tenant security, auth, deployment infrastructure)
