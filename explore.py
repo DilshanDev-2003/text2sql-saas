@@ -102,7 +102,7 @@ from semantic_layer import find_relevant_terms
 
 result = find_relevant_terms("Who are the high performer singers?", "concert_singer")
 print(result)
-"""
+
 from semantic_layer import inject_semantic_terms
 
 context = inject_semantic_terms("Who are the high performer singers?", "concert_singer")
@@ -110,3 +110,99 @@ print(context)
 
 context2 = inject_semantic_terms("What is the average age?", "concert_singer")
 print(repr(context2))
+
+
+
+# add a second term to the same database
+add_new_term("concert_singer", "veteran performer", "Age > 50")
+
+print(list_terms("concert_singer"))
+
+# confirm both terms can be detected independently
+print(find_relevant_terms("Who are the veteran performer singers?", "concert_singer"))
+print(find_relevant_terms("Who are the high performer singers?", "concert_singer"))
+
+# confirm removal works
+remove_terms("concert_singer", "veteran performer")
+print(list_terms("concert_singer"))
+
+
+from semantic_layer import add_new_term, list_terms, find_relevant_terms, remove_terms, inject_semantic_terms
+
+add_new_term("concert_singer", "veteran performer", "Age > 50")
+
+question = "Compare high performer and veteran performer singers"
+context = inject_semantic_terms(question, "concert_singer")
+print(context)
+
+remove_terms("concert_singer", "veteran performer")  # clean up after
+
+from db_connection import get_engine, get_live_schema
+
+engine = get_engine("postgresql://postgres:Dilshan&&123456@localhost:5432/text2sql_test")
+schema = get_live_schema(engine)
+print(schema)
+
+from db_connection import get_engine
+from db_runner import execute_live
+
+engine = get_engine("postgresql://postgres:Dilshan&&123456@localhost:5432/text2sql_test")
+
+result = execute_live(engine, "SELECT name FROM singer WHERE country = 'France'")
+print(result)
+
+bad_result = execute_live(engine, "SELECT nonexistent_column FROM singer")
+print(bad_result)
+
+
+from schema_validation import validate_sql
+from db_connection import get_engine, get_live_schema
+
+engine = get_engine("postgresql://postgres:Dilshan&&123456@localhost:5432/text2sql_test")
+live_schema = get_live_schema(engine)
+
+# wrap it the way validate_sql expects: {db_id: schema}
+live_schema_lookup = {"text2sql_test": live_schema}
+
+is_valid, problems = validate_sql("SELECT name FROM singer WHERE country = 'France'", "text2sql_test", live_schema_lookup)
+print(is_valid, problems)
+
+is_valid2, problems2 = validate_sql("SELECT nonexistent FROM singer", "text2sql_test", live_schema_lookup)
+print(is_valid2, problems2)
+
+
+# config.py get the connection string that wanted by the db_connection.py get_engine function.
+from config import get_connection_string
+from db_connection import get_engine
+
+engine = get_engine(get_connection_string())
+
+
+# This is how the pieces now connect for a live database.
+from config import get_connection_string
+from db_connection import get_engine, get_live_schema, get_sqlglot_dialect
+from schema_validation import validate_sql
+
+engine = get_engine(get_connection_string())
+live_schema = get_live_schema(engine)
+dialect = get_sqlglot_dialect(engine)
+sql = "SELECT name FROM singer WHERE country = 'France'"
+is_valid, problems = validate_sql(sql, live_schema=live_schema, dialect=dialect)
+print("is valid: ", is_valid)
+print("problems: ", problems)
+
+
+# Usage for a live query.
+from config import get_connection_string
+from db_connection import get_engine, get_live_schema, get_sqlglot_dialect
+from inference import generate_sql_final, _live_executor
+
+engine = get_engine(get_connection_string())
+live_schema = get_live_schema(engine)
+dialect = get_sqlglot_dialect(engine)
+
+sql = generate_sql_final(
+  model, tokenizer, question="...", db_id=None, schema_lookup=None,
+  executor=_live_executor(engine), live_schema=live_schema, dialect=dialect, n=5,
+)
+"""

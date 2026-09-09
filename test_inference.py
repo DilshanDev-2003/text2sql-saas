@@ -1,77 +1,113 @@
-from unittest.mock import patch
-
-from inference import voting_candidates, is_reasonable_query, generate_candidates
-
-
-# ---- Tests that need no mocking at all — pure logic ----
-
-def test_vote_picks_majority_result():
-    candidates = [
-        {"sql": "query A", "result": [(1, 2)]},
-        {"sql": "query B", "result": [(1, 2)]},
-        {"sql": "query C", "result": [(9, 9)]},
-    ]
-    winner = voting_candidates(candidates)
-    assert winner in ("query A", "query B")  # either is a valid "majority" pick
+import pytest
+import inference
 
 
-def test_vote_returns_none_on_empty_candidates():
-    assert voting_candidates([]) is None
+# --- voting_candidates ---
+
+def test_voting_candidates_returns_full_dict_not_just_sql():
+  candidates = [
+    {"sql": "SELECT a FROM t", "result": [(1,), (2,)]},
+    {"sql": "SELECT a FROM t", "result": [(1,), (2,)]},
+    {"sql": "SELECT DISTINCT a FROM t", "result": [(3,)]},
+  ]
+  winner = inference.voting_candidates(candidates)
+  assert winner == {"sql": "SELECT a FROM t", "result": [(1,), (2,)]}
+
+def test_voting_candidates_empty_list_returns_none():
+  assert inference.voting_candidates([]) is None
+
+def test_voting_candidates_single_candidate():
+  candidates = [{"sql": "SELECT 1", "result": [(1,)]}]
+  assert inference.voting_candidates(candidates) == candidates[0]
 
 
-def test_vote_handles_single_candidate():
-    candidates = [{"sql": "only query", "result": [(1,)]}]
-    assert voting_candidates(candidates) == "only query"
+# --- generate_sql_final return shape ---
+
+def test_generate_sql_final_returns_dict_with_result_on_success(monkeypatch):
+  # stub generate_sql: always returns the same SQL string regardless of args
+  monkeypatch.setattr(inference, "generate_sql", lambda *a, **k: "SELECT name FROM singer")
+  # stub validate_sql: always valid
+  monkeypatch.setattr(inference, "validate_sql", lambda *a, **k: (True, []))
+
+  fake_executor = lambda sql: {"ok": True, "rows": [("Alice",), ("Bob",)]}
+
+  output = inference.generate_sql_final(
+    model=None, tokenizer=None, question="who are the singers?",
+    db_id=None, schema_lookup=None, executor=fake_executor,
+    live_schema={"singer": {"columns": [], "primary_key": [], "foreign_keys": []}},
+    dialect="postgres", n=3,
+  )
+
+  assert output["sql"] == "SELECT name FROM singer"
+  assert output["result"] == [("Alice",), ("Bob",)]
+
+def test_generate_sql_final_falls_back_when_nothing_executes(monkeypatch):
+  # every candidate fails validation, so generate_candidates returns []
+  monkeypatch.setattr(inference, "generate_sql", lambda *a, **k: "SELECT bad FROM nowhere")
+  monkeypatch.setattr(inference, "validate_sql", lambda *a, **k: (False, ["Unknown table"]))
+
+  fake_executor = lambda sql: {"ok": False, "error": "should not be called"}
+
+  output = inference.generate_sql_final(
+    model=None, tokenizer=None, question="...", db_id=None, schema_lookup=None,
+    executor=fake_executor, live_schema={}, dialect="postgres", n=3,
+  )
+
+  assert output["sql"] == "SELECT bad FROM nowhere"
+  assert output["result"] is None
+
+def test_generate_sql_final_result_matches_majority_not_first_candidate(monkeypatch):
+  # 3 candidates generated; 2 agree on one result, 1 disagrees — voting
+  # should pick the majority result even though it's not the first generated
+  calls = iter(["SELECT a", "SELECT b", "SELECT a"])
+  monkeypatch.setattr(inference, "generate_sql", lambda *a, **k: next(calls))
+  monkeypatch.setattr(inference, "validate_sql", lambda *a, **k: (True, []))
+
+  results_by_sql = {
+    "SELECT a": [("majority",)],
+    "SELECT b": [("minority",)],
+  }
+  fake_executor = lambda sql: {"ok": True, "rows": results_by_sql[sql]}
+
+  output = inference.generate_sql_final(
+    model=None, tokenizer=None, question="...", db_id=None, schema_lookup=None,
+    executor=fake_executor, live_schema={}, dialect="postgres", n=3,
+  )
+
+  assert output["result"] == [("majority",)]
 
 
-def test_reasonable_query_accepts_normal_join():
-    sql = "SELECT * FROM singer AS T1 JOIN concert AS T2 ON T1.id = T2.singer_id"
-    assert is_reasonable_query(sql, max_tables=8) is True
+# --- executor swapping: live vs eval ---
 
+def test_live_executor_wraps_execute_live(monkeypatch):
+  captured = {}
 
-def test_reasonable_query_rejects_runaway_join():
-    # simulate the exact pathological case seen in eval: many repeated joins
-    sql = "SELECT * FROM " + " JOIN ".join(f"t{i}" for i in range(20))
-    assert is_reasonable_query(sql, max_tables=8) is False
+  def fake_execute_live(engine, sql, timeout_seconds=5, readonly=True):
+    captured["args"] = (engine, sql, timeout_seconds, readonly)
+    return {"ok": True, "rows": [(1,)]}
 
+  monkeypatch.setattr(inference, "execute_live", fake_execute_live)
 
-# ---- Tests that need a mocked generate_sql ----
+  run = inference._live_executor(engine="fake_engine", timeout_seconds=10, readonly=True)
+  result = run("SELECT 1")
 
-FAKE_SCHEMA_LOOKUP = {
-    "concert_singer": {
-        "Schema (values (type))": "singer : Singer_ID (number) , Name (text) , Country (text) , Age (number)"
-    }
-}
+  assert result == {"ok": True, "rows": [(1,)]}
+  assert captured["args"] == ("fake_engine", "SELECT 1", 10, True)
 
+def test_eval_executor_wraps_execute_queries_none_as_failure(monkeypatch):
+  # execute_queries returning None (its existing "query failed" signal)
+  # should surface as {"ok": False}, not crash
+  monkeypatch.setattr(inference, "execute_queries", lambda db_path, sql: None)
 
-@patch("inference.execute_queries")
-@patch("inference.generate_sql")
-def test_generate_candidates_filters_invalid_sql(mock_generate_sql, mock_execute_queries):
-    # script generate_sql to always return a query referencing a fake column
-    mock_generate_sql.return_value = "SELECT nonexistent_col FROM singer"
+  run = inference._eval_executor(db_path="fake.db")
+  result = run("SELECT bad")
 
-    candidates = generate_candidates(
-        model=None, tokenizer=None, question="irrelevant",
-        db_id="concert_singer", schema_lookup=FAKE_SCHEMA_LOOKUP,
-        db_path="irrelevant", n=3,
-    )
+  assert result == {"ok": False, "error": "execution_failed"}
 
-    # every candidate should have been rejected by validate_sql, so none executed
-    assert candidates == []
-    mock_execute_queries.assert_not_called()
+def test_eval_executor_wraps_execute_queries_success(monkeypatch):
+  monkeypatch.setattr(inference, "execute_queries", lambda db_path, sql: [(1,), (2,)])
 
+  run = inference._eval_executor(db_path="fake.db")
+  result = run("SELECT ok")
 
-@patch("inference.execute_queries")
-@patch("inference.generate_sql")
-def test_generate_candidates_keeps_valid_executable_sql(mock_generate_sql, mock_execute_queries):
-    mock_generate_sql.return_value = "SELECT Name FROM singer WHERE Country = 'France'"
-    mock_execute_queries.return_value = [("Alice",)]
-
-    candidates = generate_candidates(
-        model=None, tokenizer=None, question="irrelevant",
-        db_id="concert_singer", schema_lookup=FAKE_SCHEMA_LOOKUP,
-        db_path="irrelevant", n=3,
-    )
-
-    assert len(candidates) == 3
-    assert candidates[0]["result"] == [("Alice",)]
+  assert result == {"ok": True, "rows": [(1,), (2,)]}

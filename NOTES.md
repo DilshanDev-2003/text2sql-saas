@@ -183,7 +183,7 @@ schema_validation.py   db_runner.py   model_utils.py
 
 ---
 
-## 11. Open Threads / Next Steps
+## 11. Open Threads / Next Steps (as of Phase 8)
 
 - **Full validation + voting eval (150-sample)** — interrupted repeatedly by Colab compute limits; rerun with incremental saving in progress as of the last session. Check `results_v2_checkpoint.jsonl` on Drive.
 - **Full 1034-example eval** — never completed for any checkpoint; all accuracy numbers so far are from a 150-example random sample (seed=42), which has a real margin of error (~±7 points at n=150). Worth running the full set once a checkpoint is considered stable.
@@ -206,33 +206,13 @@ schema_validation.py   db_runner.py   model_utils.py
 - **A small, narrow fix to training data can teach a real pattern without moving the aggregate number** — check targeted before/after comparisons, not just the overall score.
 - **Explain every "why this tool/approach over that one" choice at the time it's made** — it's cheap to do in the moment and expensive to reconstruct later.
 
-## Semantic Layer — In Progress
-
-Built (semantic_layer.py, no GPU needed, both tested working):
-- find_relevant_terms(question, db_id) — detects known business terms
-  in a question via substring match against SEMANTIC_TERMS dict
-- inject_semantic_context(question, db_id) — formats matched terms
-  into a prompt-ready text block, empty string if nothing matched
-
-Wired into model_utils.py's generate_sql() (Step 3) — code written,
-NOT YET VERIFIED, needs GPU/Colab access to confirm the model actually
-uses the injected definitions correctly. Currently using one invented
-example term ("high performer" -> Age < 30 AND country = 'France')
-in the concert_singer schema, purely for testing the mechanism —
-not a real business need yet (no real customer data/questions to
-draw from).
-
-Next when Colab available: run generate_sql with a question containing
-"high performer" and confirm the generated SQL actually reflects
-the injected definition rather than hallucinating.
-
 ## Semantic Layer — Complete
 
-Built and fully verified (semantic_layer.py + model_utils.py integration):
-- find_relevant_terms(question, db_id) — detects known business terms
-- inject_semantic_context(question, db_id) — formats matched terms
+Built and fully verified (`semantic_layer.py` + `model_utils.py` integration):
+- `find_relevant_terms(question, db_id)` — detects known business terms
+- `inject_semantic_context(question, db_id)` — formats matched terms
   into a prompt-ready text block
-- Wired into generate_sql() in model_utils.py
+- Wired into `generate_sql()` in `model_utils.py`
 
 Verified in Colab with an invented example term ("high performer" ->
 Age < 30 AND country = 'France' in concert_singer schema):
@@ -241,7 +221,77 @@ Age < 30 AND country = 'France' in concert_singer schema):
 - Question NOT containing the term generated normal, unaffected SQL
   (confirms the empty-context guard works, no leakage)
 
-Current limitation: SEMANTIC_TERMS is a hardcoded example dict, not
+Current limitation: `SEMANTIC_TERMS` is a hardcoded example dict, not
 real business terminology — built to verify the mechanism, not
 because a real need has appeared yet. Expand with real terms if/when
 actual user questions surface jargon the schema doesn't cover.
+
+---
+
+## 13. Phase 9 — Live Database Connectivity (in progress)
+
+**Motivation:** First item on the Deployment Readiness half of the roadmap — the product currently only ever queries Spider's static SQLite files. Nothing yet connects to an actual customer database. This phase is scoped narrowly to "connect, introspect, and safely execute against a live DB" — not to rewiring `inference.py`'s generation strategies to use it, which is a deliberately separate, later step.
+
+**New/changed files, four incremental steps taken in this order (each building on the safety guarantee of the one before it):**
+
+1. **`query_guard.py`** (new) — `guard_readonly(sql)`. Rejects anything that isn't a plain `SELECT`, checked two ways: first-keyword check (catches non-read statements outright) and a full-string disallowed-keyword scan (catches a `WITH ... AS (DELETE ... RETURNING *) SELECT ...` CTE that starts with `SELECT` but mutates data inside). Split into its own file rather than inlined into `db_runner.py` so it's independently unit-testable and reusable anywhere else generated SQL needs checking later (e.g. a future "preview before run" UI step). Read-only was chosen deliberately as the launch default — read/write can be added later as an opt-in, higher-trust tier.
+
+   - **`test_query_guard.py`** (new) — pytest, matches the existing `test_*.py` style. Covers: plain/whitespace/case-insensitive SELECTs pass; INSERT/UPDATE/DELETE/DROP rejected; the disguised-DELETE-in-a-CTE case; empty string rejected.
+
+2. **`db_runner.py`** (edited) — `execute_live()` now calls `guard_readonly()` before running anything (when `readonly=True`, the default), and the `timeout_seconds` parameter — previously accepted but never actually used — is now enforced via a `ThreadPoolExecutor` future with a timeout. Return shape changed from "rows or `None`" to `{"ok": bool, "rows"/"error": ...}`, so a caller (and eventually an API layer) can distinguish "ran successfully, zero rows" from "failed to run" — the old `None`-for-everything behavior couldn't. `execute_queries()` and `compare_execution()` (the SQLite eval-harness path) are untouched.
+
+3. **`db_connection.py`** (edited), two changes:
+   - `get_live_schema()` now returns columns with types, plus primary key and foreign keys per table (was previously just a flat list of column names). This is a breaking change to the return shape, made now specifically because nothing consumes the old shape yet — `schema_validation.py` and the semantic layer will need types/keys, not just names, once live schemas are wired into them.
+   - `get_engine()` now sets `pool_pre_ping=True` and `pool_recycle=3600` (avoids handing out dead/stale connections), and adds a Postgres-specific server-side `statement_timeout` via `connect_args` (libpq's `options` arg) when the connection string is `postgresql://...`. Scoped to Postgres only, deliberately — MySQL, Snowflake, etc. each have their own timeout mechanism, and guessing wrong would silently do nothing rather than actually enforce a limit. This works alongside `execute_live`'s thread-based timeout, not instead of it: the thread timeout stops the app from waiting, this stops the query from running on Postgres's server at all.
+
+4. **`schema_validation.py`** and **`inference.py`** (edited) — `validate_sql()` and `is_reasonable_query()` both hardcoded `sqlglot.parse_one(sql, read="sqlite")`. Added a `dialect="sqlite"` parameter to both (default unchanged, so the Spider eval harness and existing tests are unaffected) so a live engine's dialect can be passed in once live, non-SQLite schemas are actually being validated.
+
+**Known follow-up, not yet done:** SQLAlchemy's dialect name and sqlglot's aren't always identical (SQLAlchemy: `"postgresql"`, sqlglot: `"postgres"`) — a small mapping dict will be needed when `db_connection.py`'s engine is actually plugged into `validate_sql`/`is_reasonable_query`, rather than passing `engine.dialect.name` straight through.
+
+**Not yet done (explicitly deferred):**
+- Wiring `execute_live` / `get_live_schema` into `inference.py`'s actual generation strategies — right now `generate_sql_final` etc. still only exercise the SQLite eval path.
+- Credential storage for connection strings (plaintext today) — needs a real secrets approach before this touches a real customer DB, and will matter more once multi-tenant isolation (a separate roadmap item) is built.
+- Timeout mechanisms for MySQL/Snowflake/BigQuery (only Postgres has server-side enforcement so far).
+
+---
+
+## 14. Phase 10 — Live Database Connectivity: Closed Out
+
+Picked up exactly where Phase 9 left off: the three deferred items (credentials, schema-validation wiring, execution wiring) were finished today, closing out live database connectivity end-to-end.
+
+**1. Credentials — `config.py` (new)**
+
+`get_connection_string(env_var="DATABASE_URL")` reads the connection string from an environment variable instead of a hardcoded value, via `python-dotenv` loading a local (gitignored) `.env` file. Not a full secrets-manager — deliberately the standard baseline for a single dev with no customers yet, not a speculative build-ahead. `.env.example` added as a committed template. Requires adding `python-dotenv` to `requirements.txt` and confirming `.env` is in `.gitignore` (both manual, not code).
+
+**2. `schema_validation.py` — live-schema-aware validation (edited)**
+
+`validate_sql()` previously assumed one schema shape (the Spider string format). It now accepts a `live_schema` parameter — a dict from `get_live_schema()` — which takes priority over `schema_lookup`/`db_id` when provided, and made those two optional so live callers don't need to fabricate a fake `db_id`. A new `extract_column_names()` normalizer collapses all three schema shapes the codebase now produces (Spider string, old flat dict, live typed dict) down to what validation needs today — column existence, not yet types/joins.
+
+Added alongside this: `get_sqlglot_dialect()` in `db_connection.py`, mapping SQLAlchemy dialect names to sqlglot's (they don't always match — `"postgresql"` vs `"postgres"`) — this was flagged as a follow-up in Phase 9 and became necessary the moment live validation was actually wired up.
+
+Tested in `test_schema_validation.py`: normalizer on all three shapes, valid/unknown-column/unknown-table/join cases against a live schema, live_schema-takes-priority case, and the new `ValueError` when neither schema source is given. 9/9 passing.
+
+**3. `model_utils.py` — live-schema-aware prompting (edited)**
+
+`generate_sql()` had the same single-shape assumption as `validate_sql()` did, but for prompt-building instead of validation — `format_schema()` only knew the Spider string format. Added `format_live_schema()` (builds an equivalent prompt string from a live typed schema) and a `live_schema` parameter on `generate_sql()` with the same priority rule as `validate_sql`. This was the actual blocker preventing a live query from working end-to-end — validation could already check live SQL, but nothing could *generate* a prompt for a live schema in the first place.
+
+**Known gap, not yet closed:** `inject_semantic_terms()` is keyed on `db_id`, and a live connection currently has no `db_id` assigned. Business-term injection silently does nothing for live-connected databases until each one gets an assigned `db_id` to key `semantic_terms.json` entries against. Not urgent (no live customer using semantic terms yet), but will surface as "why doesn't it know our business terms" the first time it matters.
+
+**4. `inference.py` — executor abstraction (edited)**
+
+Rather than duplicating the three generation strategies (`generate_sql_query_with_retry`, `generate_candidates`, `generate_sql_final`) into live/eval variants, added an `executor` parameter to each: a callable `(sql) -> {"ok": bool, "rows"/"error": ...}`. `_eval_executor(db_path)` adapts the existing `execute_queries` SQLite path to this interface; `_live_executor(engine, ...)` wraps `execute_live`. One code path serves both, rather than two that would inevitably drift.
+
+Also changed: `voting_candidates()` now returns the full winning `{"sql", "result"}` dict instead of just the SQL string, and `generate_sql_final()` returns `{"sql": ..., "result": ...}` (result is `None` on the greedy-fallback path, when nothing validated and executed successfully). This was needed because `generate_candidates` already executes every candidate internally to vote on it — throwing that result away and making the caller re-run the winning query would mean hitting the database twice for no reason.
+
+**Debugging note:** after this edit, `test_inference.py` initially failed with `db_path` still being a required positional argument and `voting_candidates` still returning a bare string — the edit hadn't fully landed in the actual file despite being sent. A full-file replacement (rather than another incremental patch) was used to remove any ambiguity about the file's actual state, since incremental edits across many turns in one session had gotten hard to track by eye. One follow-up round after that still surfaced a stale `generate_sql_final` (`TypeError: string indices must be integers, not 'str'` — the exact signature of a fallback branch still returning a bare string instead of a dict) — fixed once the full file was confirmed replaced. **Lesson:** when a file's been patched many times across a long session, a full-file replacement is more reliable than another targeted diff, and a `TypeError` on string-indexing a return value is a strong signal that a return-shape change didn't actually take.
+
+Tested in `test_inference.py` (`monkeypatch`-based — stubs `generate_sql`/`validate_sql` so the orchestration logic is tested independently of the actual model): `voting_candidates` returns the full dict not just SQL; `generate_sql_final` returns `{"sql", "result"}` on success, falls back correctly (and never calls the executor) when nothing validates, picks the majority result correctly when candidates disagree; `_live_executor`/`_eval_executor` correctly wrap `execute_live`/`execute_queries` including the `None`-as-failure translation. 9/9 passing.
+
+**Result: live database connectivity is done, end-to-end.** Connect (`db_connection.get_engine`, credentials via `config.py`) → introspect (`get_live_schema`, typed) → generate (`model_utils.generate_sql`, live-schema-aware prompting) → validate (`schema_validation.validate_sql`, live-schema-aware, dialect-correct) → safely execute (`db_runner.execute_live`, read-only-enforced, timed out) → vote (`inference.generate_sql_final`, executor-abstracted) → return SQL + answer together. First item on the Deployment Readiness roadmap, complete.
+
+**Carried-forward gaps (unchanged from Phase 9, still real):**
+- Semantic-layer term injection has no `db_id` path for live connections yet.
+- Credential storage is env-var-based — fine for one dev, not yet multi-tenant-safe.
+- Server-side query timeout enforcement is Postgres-only; MySQL/Snowflake/BigQuery still rely solely on the app-side thread timeout.
+
+**Next roadmap item:** model serving as a persistent API service — `model`/`tokenizer` are still loaded manually into whatever script calls this; nothing runs as a standing service yet.

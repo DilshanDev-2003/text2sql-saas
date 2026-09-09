@@ -1,0 +1,5 @@
+{
+  "concert_singer": {
+    "high performer": "Age < 30 AND country = 'France'"
+  }
+}

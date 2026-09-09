@@ -1,4 +1,7 @@
 import sqlite3
+from sqlalchemy import text
+from query_guard import guard_readonly
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 def execute_queries(db_path, query, timeout_seconds=5):
   conn = sqlite3.connect(db_path, timeout=timeout_seconds)
@@ -11,6 +14,28 @@ def execute_queries(db_path, query, timeout_seconds=5):
     results = None
   conn.close()
   return results
+
+def execute_live(engine, query, timeout_seconds=5, readonly=True):
+  """
+    Executes SQL against a live SQLAlchemy-connected database (Postgres,
+    MySQL, etc.)
+  """
+  if readonly:
+    guard_readonly(query)
+
+  def _run():
+    with engine.connect() as connection:
+      results = connection.execute(text(query))
+      return results.fetchall()
+
+  with ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(_run)
+    try:
+      return {"ok": True, "rows": future.result(timeout=timeout_seconds)}
+    except FutureTimeoutError:
+      return {"ok": False, "error": "query timeout"}
+    except Exception as e:
+      return {"ok": False, "error": str(e)}
 
 def compare_execution(db_path, ac_sql, gen_sql):
   ac_res = execute_queries(db_path, ac_sql)

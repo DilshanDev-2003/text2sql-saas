@@ -29,14 +29,56 @@ def parse_schema_string(schema_str):
     tables[table_name] = col_names
   return tables 
 
-def validate_sql(sql, db_id, schema_lookup):
+def extract_column_names(real_schema):
   """
-    Validating the sql
+    Normalizes any of the three schema shapes the codebase currently
+    produces into a flat {table: [col_names]} dict, which is all
+    validate_sql needs for existence checks today:
+      1. Spider string format — handled upstream by parse_schema_string(),
+         already flat by the time it reaches here.
+      2. Old-style flat dict {table: [col_names]} — passed through as-is.
+      3. Live typed dict from get_live_schema(): {table: {"columns": [
+         {"name","type"}], "primary_key": [...], "foreign_keys": [...]}} —
+         unwrapped to just the column names.
+    Types/PK/FK from shape 3 aren't used here yet — this function only
+    answers "does this column exist," not "is the type/join valid" — but
+    keeping the fuller shape upstream means that logic can be added later
+    without another schema-shape migration.
+  """
+  normalized = {}
+  for table, value in real_schema.items():
+    if isinstance(value, dict) and "columns" in value:
+      normalized[table] = [col["name"] for col in value["columns"]]
+    else:
+      normalized[table] = value
+  return normalized      
+
+def validate_sql(sql, db_id=None, schema_lookup=None, dialect="sqlite", live_schema=None):
+  """
+    Validating the sql.
+
+    Two ways to supply the schema to validate against:
+      - schema_lookup + db_id: existing Spider-eval path, unchanged.
+      - live_schema: a dict from db_connection.get_live_schema(), for
+        validating against a real connected database. When provided, it
+        takes priority over schema_lookup/db_id, and those two become
+        optional so callers validating live SQL don't need to fabricate
+        a db_id/schema_lookup that doesn't apply to them.
   """
   problems = []
 
-  schema_row = schema_lookup[db_id]
-  real_schema = parse_schema_string(schema_row["Schema (values (type))"])
+  if live_schema is not None:
+    real_schema = extract_column_names(live_schema)
+  else:
+    if schema_lookup is None or db_id is None:
+      raise ValueError("Must provide either live_schema or both db_id and schema_lookup.")
+
+    schema_row = schema_lookup[db_id]
+    if isinstance(schema_row, dict) and "Schema (values (type))" in schema_row:
+      real_schema = parse_schema_string(schema_row["Schema (values (type))"])
+    else:
+      real_schema = schema_row  
+
   real_schema_lower = {
     table.lower(): [col.lower() for col in cols]
     for table, cols in real_schema.items()
@@ -44,7 +86,7 @@ def validate_sql(sql, db_id, schema_lookup):
   real_table_names_lower = set(real_schema_lower.keys())
 
   try:
-    parsed = sqlglot.parse_one(normalize_quotes(sql), read="sqlite")
+    parsed = sqlglot.parse_one(normalize_quotes(sql), read=dialect)
   except Exception as e:
     return False, [f"Failed to parse SQL: {e}"]
 
