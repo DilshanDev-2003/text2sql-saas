@@ -48,7 +48,7 @@ def generate_sql_query_with_retry(model, tokenizer, question, db_id, schema_look
   """
   run = executor or _eval_executor(db_path)
 
-  greedy = generate_sql(model, tokenizer, question, db_id, schema_lookup, do_sample=False)
+  greedy = generate_sql(model, tokenizer, question, db_id, schema_lookup, live_schema=live_schema,do_sample=False)
   is_valid, problems = validate_sql(greedy, db_id, schema_lookup, dialect=dialect, live_schema=live_schema)
   if is_valid:
     result = run(greedy)
@@ -56,7 +56,7 @@ def generate_sql_query_with_retry(model, tokenizer, question, db_id, schema_look
        return greedy 
 
   for _ in range(n):
-    sql = generate_sql(model, tokenizer, question, db_id, schema_lookup, do_sample=True, temperature=0.7)
+    sql = generate_sql(model, tokenizer, question, db_id, schema_lookup, live_schema=live_schema,do_sample=True, temperature=0.7)
     is_valid, problems = validate_sql(sql, db_id, schema_lookup, dialect=dialect, live_schema=live_schema)
     if not is_valid:
       continue
@@ -71,7 +71,7 @@ def generate_candidates(model, tokenizer, question, db_id, schema_lookup, db_pat
     candidates = []
     
     for i in range(n):
-        sql = generate_sql(model, tokenizer, question, db_id, schema_lookup, do_sample=True, temperature=0.7)
+        sql = generate_sql(model, tokenizer, question, db_id, schema_lookup, live_schema=live_schema,do_sample=True, temperature=0.7)
         if is_reasonable_query(sql, max_tables=8, dialect=dialect):
           is_valid, problems = validate_sql(sql, db_id, schema_lookup, dialect=dialect, live_schema=live_schema)
           if not is_valid:
@@ -108,7 +108,7 @@ def generate_sql_final(model, tokenizer, question, db_id, schema_lookup, db_path
     if not candidates:
         # nothing valid/executable at all — fall back to a plain greedy attempt,
         # even if we already suspect it might fail, so we return SOMETHING
-        fallback_sql = generate_sql(model, tokenizer, question, db_id, schema_lookup, do_sample=False)
+        fallback_sql = generate_sql(model, tokenizer, question, db_id, schema_lookup, live_schema=live_schema,do_sample=False)
         return {"sql": fallback_sql, "result": None}
 
     return voting_candidates(candidates)

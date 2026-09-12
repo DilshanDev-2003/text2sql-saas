@@ -1,0 +1,19 @@
+# Colab already has torch preinstalled with the right CUDA build —
+# do NOT pin torch here, reinstalling it risks a CUDA/driver mismatch.
+
+# Model serving
+transformers
+peft
+bitsandbytes
+accelerate
+
+# API service
+fastapi
+uvicorn
+pyngrok
+
+# Product code dependencies (mirrors requirements.txt)
+sqlalchemy
+sqlglot
+python-dotenv
+psycopg2-binary
