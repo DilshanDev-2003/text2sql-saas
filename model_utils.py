@@ -7,9 +7,39 @@ def format_schema(schema_row):
         f"Foreign Keys: {schema_row['Foreign Keys']}"
     )
 
-def generate_sql(model, tokenizer, question, db_id, schema_lookup, do_sample=False, temperature=1.0):
-    schema_row = schema_lookup[db_id]
-    schema_str = format_schema(schema_row)
+def format_live_schema(live_schema):
+    """
+        Build an equivalent prompt-ready schema string from db_connection.get_live_schema()'s dict.
+    """
+    lines = []
+    pk_lines = []
+    fk_lines = []
+
+    for table, info in live_schema.items():
+        cols = ", ".join(f"{c['name']} ({c['type']})" for c in info["columns"])
+        lines.append(f"{table}: {cols}")
+
+        if info["primary_key"]:
+            pk_lines.append(f"{table}: {", ".join(info['primary_key'])}")
+
+        for fk in info["foreign_keys"]:
+            fk_lines.append(f"{table}.{", ".join(fk['columns'])} -> {fk['references']}")
+
+    schema_block = " | ".join(lines)
+    pk_block = "; ".join(pk_lines)
+    fk_block = "; ".join(fk_lines)
+
+    return f"{schema_block}\nPrimary Keys: {pk_block}\nForeign Keys: {fk_block}"
+           
+
+def generate_sql(model, tokenizer, question, db_id=None, schema_lookup=None, live_schema=None,do_sample=False, temperature=1.0):
+    if live_schema is not None:
+       schema_str = format_live_schema(live_schema)
+    else:
+       if schema_lookup is None or db_id is None:
+          raise ValueError("Must provide either live_schema, or both db_id and schema_lookup")   
+       schema_row = schema_lookup[db_id]
+       schema_str = format_schema(schema_row)
 
     semantic_context = inject_semantic_terms(question, db_id)
 
