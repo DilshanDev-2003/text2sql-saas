@@ -41,7 +41,7 @@ def generate_sql(model, tokenizer, question, db_id=None, schema_lookup=None, liv
        schema_row = schema_lookup[db_id]
        schema_str = format_schema(schema_row)
 
-    semantic_context = inject_semantic_terms(question, db_id)
+    semantic_context = inject_semantic_terms(question, db_id) if db_id else ""
 
     prompt = f"Schema:\n{schema_str}\n"
     if semantic_context:    

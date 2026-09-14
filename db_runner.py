@@ -26,7 +26,7 @@ def execute_live(engine, query, timeout_seconds=5, readonly=True):
   def _run():
     with engine.connect() as connection:
       results = connection.execute(text(query))
-      return results.fetchall()
+      return [tuple(row) for row in results.fetchall()]
 
   with ThreadPoolExecutor(max_workers=1) as executor:
     future = executor.submit(_run)

@@ -28,7 +28,7 @@ def load_model():
     bnb_4bit_use_double_quant=True,
   )
 
-  _tokenizer = AutoTokenizer.from_pretrained(ADAPTER_REPO, token=token)
+  _tokenizer = AutoTokenizer.from_pretrained(ADAPTER_REPO, token=token, clean_up_tokenization_spaces=False)
 
   base_model = AutoModelForCausalLM.from_pretrained(
     BASE_MODEL_REPO,
