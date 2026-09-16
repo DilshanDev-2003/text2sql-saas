@@ -51,10 +51,26 @@ async def generate(req: GenerateRequest):
       n=req.n,
     )    
   except Exception as e:
-    raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=500, detail="Something went wrong while generating a response.")
+
+  if output["result"] is None:
+    raise HTTPException(
+      status_code=422,
+      detail={
+        "message": "Couldn't create a query that validated and executed successfully.",
+        "attempted_sql": output["sql"]
+      }
+    )
 
   return GenerateResponse(sql=output["sql"], result=output["result"])  
 
 @app.get("/health")
 async def health():
   return {"status": "ok"}
+
+@app.get("/schema")
+async def schema():
+  """
+    Returns the live database's schema(e.g., tables, column names with types, primary keys, and foreign keys.)
+  """  
+  return _live_schema

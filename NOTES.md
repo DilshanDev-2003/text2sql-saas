@@ -295,3 +295,113 @@ Tested in `test_inference.py` (`monkeypatch`-based — stubs `generate_sql`/`val
 - Server-side query timeout enforcement is Postgres-only; MySQL/Snowflake/BigQuery still rely solely on the app-side thread timeout.
 
 **Next roadmap item:** model serving as a persistent API service — `model`/`tokenizer` are still loaded manually into whatever script calls this; nothing runs as a standing service yet.
+
+---
+
+## 15. Phase 11 — Model Serving as a Persistent API (in progress)
+
+**Motivation:** the second Deployment Readiness item. Everything so far loads `model`/`tokenizer` manually into whatever script or notebook calls it — nothing stands as a running service that an API layer (or anything else) can call without reloading the model from scratch each time.
+
+**Stack decision:** FastAPI, deployed to a GPU-available host (not CPU-only). Chosen partly because FastAPI can double as the actual product API layer later (a separate, still-unbuilt roadmap item), not just a model-serving shim.
+
+**Design, two new files:**
+
+- **`model_loader.py`** (new) — loads the model/tokenizer once as a module-level singleton, with an explicit `load_model()` to trigger loading and `get_model_and_tokenizer()` to access it afterward. `get_model_and_tokenizer()` raises rather than lazily loading, so a route handler can never accidentally trigger a slow first-load mid-request.
+- **`app.py`** (new) — the FastAPI service. Loads the model once via FastAPI's `lifespan` startup hook (not per-request). The `/generate` route wraps `inference.generate_sql_final`, run via `run_in_threadpool` — necessary because model generation is a blocking, GPU-bound call, and running it directly inside an `async def` route would stall FastAPI's single event loop for the full generation time, queuing up every other request (even a trivial `/health` check) behind it.
+
+**Known gaps flagged at design time, not yet resolved:**
+- `/generate`'s request shape currently only makes sense for the Spider eval `schema_lookup` (`question` + `db_id`) — not yet wired to accept a live database connection reference instead, which is what the actual product needs. Deliberately left as an open gap rather than gluing in eval-only code that would need ripping out immediately.
+- No concurrency limit on GPU work — `run_in_threadpool` will run multiple `generate_sql_final` calls concurrently if requests overlap, but a single GPU usually serves one generation efficiently at a time. Not a problem solo, will matter once tested under concurrent load.
+
+**Bug: `ValueError: Unrecognized model in ... Should have a model_type key in its config.json`**
+
+Hit on first real load attempt, using `checkpoint-270`'s Hugging Face repo (`DilshanDev/llama-text2sql-v2-saas`) directly as `MODEL_REPO` with plain `AutoModelForCausalLM.from_pretrained`. Root cause: `checkpoint-270` was trained with QLoRA, so what got pushed to that repo is a **LoRA adapter** (`adapter_config.json` + adapter weights), not a full standalone model — an adapter has no `model_type` of its own because it isn't a complete model, it's a set of weight deltas meant to sit on top of the original base model.
+
+**Fix:** load the base model first (`meta-llama/Llama-3.2-3B-Instruct` — matches NOTES.md's description of the base model, though not yet independently confirmed against the actual training notebook's exact `from_pretrained` call), then apply the adapter on top via `peft.PeftModel.from_pretrained(base_model, ADAPTER_REPO)`. `model_loader.py` updated accordingly. Two follow-ups noted, not yet resolved: confirm `peft` is listed in the serving-side `requirements.txt` (not only the training-side one), and confirm the exact base model repo string against the training notebook rather than assuming it.
+
+**Credentials — HF token support added defensively.** Repo visibility (public vs. private) for `DilshanDev/llama-text2sql-v2-saas` wasn't confirmed, so rather than wait to find out, added optional token support now: `config.get_hf_token()` (mirrors `get_connection_string()`'s env-var pattern, but returns `None` instead of raising when unset, since a public repo needs no token at all). Threaded through `model_loader.py`'s `from_pretrained` calls. `.env.example` updated with an `HF_TOKEN` entry and a note that it's only required for private/gated repos. Separately flagged: `meta-llama/Llama-3.2-3B-Instruct` (the base model) is itself a **gated** repo on Hugging Face regardless of the adapter repo's visibility — it requires accepting Meta's license and a valid token to load at all, which makes `HF_TOKEN` non-optional in practice even if the adapter repo turns out to be public.
+
+**In progress, not yet resolved as of this note:** after the LoRA fix, the base model began downloading (~6.43GB, first time on this machine) — slow connection, expected to take a long while. Confirmed this is normal (not an error) and that Hugging Face caches the download on disk, so it only needs to happen once per machine regardless of what happens afterward (a later error in adapter-loading or elsewhere wouldn't require re-downloading, only a genuinely interrupted/corrupted download would). Session paused here to let the download finish; whether the adapter then applies cleanly and the server actually reaches `Application startup complete` is unconfirmed.
+
+**Still open going into next session:**
+- Did `app.py` reach `Application startup complete`, or error after the download finished?
+- Confirm the actual base model repo string against the training notebook.
+- Confirm `DilshanDev/llama-text2sql-v2-saas`'s public/private status, and set a real `HF_TOKEN` in `.env` if needed (the base model being gated makes this likely necessary either way).
+- The `/generate` request-shape gap (Spider `db_id` vs. a live connection reference) still needs a real design decision, not just a flag.
+
+---
+
+## 16. Phase 12 — Model Serving: Closed Out (long session, many bugs, real success at the end)
+
+Picked up exactly where Phase 11 left off. This phase involved more distinct bugs than any prior phase — documented in the order encountered, since several are genuinely reusable lessons for future infra work, not just today's fixes.
+
+**1. Hardware reality check — local GPU insufficient.**
+
+Confirmed via `nvidia-smi`: local machine is a Windows laptop with an **RTX 2050, 4GB total VRAM**, ~700MB already claimed by OS/background processes. A 3B model even in 4-bit (~2–2.5GB weights) plus CUDA overhead plus generation buffers doesn't comfortably fit. Considered vLLM as an alternative — rejected for two reasons: it optimizes for concurrent-request throughput on datacenter GPUs (can use *more* baseline memory than plain `transformers` for a single request), and it has no native Windows support (Linux/WSL2 only), which was confirmed as the actual OS in use via traceback paths and `nvidia-smi`'s `WDDM` driver model.
+
+**Decision:** serve from **Google Colab's free GPU tier** for now, tunneled out via **ngrok**, explicitly as a temporary measure — not the real deployment. Confirmed with the user that the code itself (`app.py`, `model_loader.py`, `config.py`'s env-var pattern) is already environment-agnostic, so the transition to a real paid GPU host later is "run the same files somewhere else," not a rewrite. No budget for a paid GPU currently; investigated AWS/GCP/Azure free tiers and confirmed none include an always-free GPU tier — only time-limited trial credits, none of which fit a $0-budget, indefinite-testing use case. Decision: use free trial-credit-free options (Colab/Kaggle) for testing, pay for a real host only once there are actual users.
+
+**2. `peft` LoRA loading crash — `ValueError: Unrecognized model ... no model_type`.**
+
+Covered in Phase 11 — confirmed fix (load base model, then `PeftModel.from_pretrained` on top) worked once actually tested.
+
+**3. `peft` offload crash — `KeyError: 'base_model.model.model.model.embed_tokens'`.**
+
+Hit once the base model actually loaded with `device_map="auto"` in bfloat16 — triggered because `accelerate` decided to offload some layers to CPU/disk (base model didn't fit in bfloat16 in available VRAM), and `peft`'s adapter-loading code has a known module-path bug when applying an adapter on top of an offloaded model.
+
+**Fix:** switched to **4-bit quantization** (`BitsAndBytesConfig`, `nf4`, double quant, bfloat16 compute dtype) — chosen for two reasons, not one: it matches the original QLoRA training setup (base model was also 4-bit during training), and a 4-bit 3B model is small enough to plausibly avoid the offloading path that triggers the `peft` bug entirely.
+
+**4. Quantization still insufficient — `ValueError: modules dispatched on CPU/disk`.**
+
+Even at 4-bit, `accelerate` still needed to offload on the local RTX 2050 — confirmed this is a genuine hardware ceiling, not a config problem, once the local GPU's real free VRAM (~3.3GB after OS overhead) was checked against the model's real footprint. This confirmed the Colab decision from step 1 was correct rather than premature.
+
+**5. `ngrok` auth — `ERR_NGROK_4018`, then quota — `ERR_NGROK_324`.**
+
+`ngrok` now requires a free account + authtoken even for anonymous tunnels (policy changed since older tutorials). Separately, hit a "5 endpoint" cap from **stale tunnels** left behind by uncleanly-disconnected earlier Colab sessions (a Colab runtime dying doesn't get a chance to run tunnel cleanup code). Fixed by manually clearing stale tunnels from the ngrok dashboard, and adding `ngrok.kill()` before `ngrok.connect()` in code to reduce recurrence going forward (though this only cleans up the current process's tunnels, not ones orphaned by a prior uncleanly-ended session).
+
+**Security note, twice repeated:** the real ngrok authtoken was accidentally pasted in plaintext into chat on two separate occasions during this session. Advised rotating it both times; user confirmed rotation and correctly commented `# rotated, not the leaked one` in the Colab cell on the second occurrence.
+
+**6. Postgres connection — pooled vs. direct connection string.**
+
+Neon's default connection string is **pooled** (routed through PgBouncer, hostname contains `-pooler`). `db_connection.py`'s Postgres `statement_timeout` (set via `connect_args={"options": "-c statement_timeout=..."}`, from Phase 9/10) is a session-level startup parameter that PgBouncer's transaction-pooling mode rejects outright — `ERROR: unsupported startup parameter in options: statement_timeout`. **Fix:** use Neon's **direct/unpooled** connection string instead of the pooled one. **Flagged as a real future gap, not fixed today:** if a real deployment later wants connection pooling (likely, for concurrent-user efficiency), `get_engine()` will need to either detect pooled connections and skip the startup-parameter timeout, or set the timeout a different way (e.g. a per-query `SET statement_timeout` instead of a connection-level parameter).
+
+**7. `app.py`/`model_utils.py` request-shape redesign.**
+
+Resolved the Phase 11 open gap: `/generate` no longer takes Spider's `db_id` — it targets a single live DB connection established once at startup (`lifespan` hook), matching the "connect once, not per-request" pattern already used for the model itself. `model_utils.py` gained `format_live_schema()` and a `live_schema` parameter on `generate_sql()`, mirroring the `live_schema` pattern already built into `validate_sql()` in Phase 10.
+
+**8. Stale-file whack-a-mole — three separate bugs, one root cause.**
+
+Manually uploading individual files to Colab (rather than `git clone`) meant several files silently stayed on old versions while local files had moved on:
+- Old `app.py` still required `db_id` → `422 Field required`
+- Old `model_utils.py` had no `live_schema` param → `'NoneType' object is not subscriptable`, then (after a partial fix) `generate_sql() got an unexpected keyword argument 'live_schema'`
+- A genuinely new bug surfaced once files were current: **`inference.py` was passing `live_schema` to `validate_sql()` calls but not to the parallel `generate_sql()` calls in the same functions** — missed when the executor abstraction was wired through in Phase 10, never caught by `test_inference.py` because its monkeypatched `generate_sql` stub ignores all arguments regardless of what's passed (a real, acknowledged gap in that test's coverage).
+
+**Fix, and the more important lesson:** stopped patching individual files in Colab entirely. Switched to `git push` locally, then `rm -rf` + fresh `git clone` in Colab for every subsequent change — eliminated this entire class of bug for the rest of the session. **Standing practice going forward: never manually re-upload individual files to Colab once a project has multiple interdependent files — always sync via git.**
+
+**9. Silent server shutdown — background `subprocess.Popen` killed by unrelated cell interrupts.**
+
+Running `uvicorn` as a foreground blocking cell made it impossible to test locally from another cell at the same time. Switched to `subprocess.Popen` in the background — but the server would silently receive `Shutting down` (uvicorn's standard SIGINT message) with no user-initiated Ctrl+C. **Root cause:** `subprocess.Popen` by default launches the child in the *same process group* as the notebook — interrupting any other cell (e.g. stopping a hung test request) can send SIGINT to the entire process group, killing the background server as collateral damage. **Fix:** `start_new_session=True` on the `Popen` call, isolating the server into its own session so other cells' interrupts can't reach it.
+
+**10. CPU-only Colab runtime — multi-minute generation times, no error at all.**
+
+After fixing the shutdown bug, a single `n=1` generation request took the full 300-second client timeout with no crash. Diagnosed by checking `nvidia-smi` *during* a live request — returned `command not found`, revealing the Colab runtime had **no GPU attached at all** (a CPU-only runtime type, confirmed via the Resources panel showing no GPU line, only RAM/Disk). `device_map="auto"` silently falls back to CPU with no warning or error when no GPU is visible, which is why nothing in the logs pointed here directly — everything "worked," just 10-20x slower than expected. **Fix:** Colab → Runtime → Change runtime type → T4 GPU. Confirmed fixed: a subsequent `n=1` request dropped from 300+ seconds (timeout) to ~5-9 seconds once genuinely running on GPU.
+
+**11. `PydanticSerializationError: Unable to serialize unknown type: sqlalchemy.engine.row.Row`.**
+
+First real `200`-adjacent failure once GPU + DB + generation all actually worked — `/generate` returned a bare `500 Internal Server Error` with no JSON detail, because the failure happened in FastAPI's response serialization, outside the route's `try/except`. Root cause: `execute_live`'s `result.fetchall()` returns SQLAlchemy `Row` objects, which pydantic can't serialize to JSON — unlike `execute_queries`'s sqlite3 path, which already returns plain tuples natively. This inconsistency between the two execution paths was never caught by tests, since `test_inference.py`'s fake executors return plain tuples directly rather than exercising real SQLAlchemy output. **Fix:** `execute_live` now converts rows to plain tuples (`[tuple(row) for row in result.fetchall()]`) at the source, so every caller downstream — live or eval — works with the same plain-Python-type contract.
+
+**12. `address already in use` on restart.**
+
+A leftover `uvicorn` process (from an earlier attempt in the same long session) was still holding port 8000. Fixed with `kill -9 $(lsof -t -i:8000)` before restarting — a routine restart-hygiene step given how many restarts this session involved, not a bug in the code itself.
+
+**Result: first genuine end-to-end success.** `POST /generate` with `{"question": "average age of singers from France", "n": 5}` against the live Neon test DB returned `{"sql": "SELECT AVG(age) FROM singer WHERE country = 'France'", "result": [["29.0000000000000000"]]}` — correct query, correct answer (28+34+25 ÷ 3 = 29), in ~16 seconds on a genuinely GPU-backed Colab runtime. Notably, an `n=1` attempt on the same question had hallucinated a spurious join to a nonexistent `country` table (matching the exact "spurious/unnecessary join" failure pattern documented back in Phase 1 and Phase 3) — `n=5`'s self-consistency voting correctly filtered it out once more candidates were available to vote against it, which is the mechanism working exactly as designed under real conditions, not just Spider's eval set.
+
+**Model serving as a persistent API service is done.** Second Deployment Readiness item closed out — end-to-end: model loads once (4-bit, LoRA adapter) → live DB connects once → both reused across requests → `/generate` validates, safely executes, self-consistency-votes, returns JSON → all confirmed against a real HTTP call, not just local Python calls.
+
+**Carried-forward, explicitly not solved today:**
+- Colab + ngrok is a temporary serving setup, not the real deployment — moving to a paid GPU host is the acknowledged next infrastructure step once there are real users to justify the cost.
+- `get_engine()`'s Postgres `statement_timeout` still breaks on pooled connections — fine for now (direct connection in use), needs a real fix before pooling is used in production.
+- No concurrency limit on GPU work in `/generate` (flagged in Phase 11, still unaddressed).
+- `test_inference.py`'s monkeypatched stubs don't exercise real argument-passing between `generate_sql` and `validate_sql` calls, nor real SQLAlchemy row shapes — both gaps that let real bugs through to manual testing this session. Worth strengthening later, not urgent.
+
+**Next roadmap item:** API layer / interface for the product — `app.py` already is a FastAPI service, so this is less "start from scratch" and more "expand `/generate` into a real API surface" (multiple endpoints, request/response contracts beyond a single route, etc.) — exact scope not yet defined.
