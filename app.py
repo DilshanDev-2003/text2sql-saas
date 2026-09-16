@@ -54,12 +54,20 @@ async def generate(req: GenerateRequest):
     raise HTTPException(status_code=500, detail="Something went wrong while generating a response.")
 
   if output["result"] is None:
+    if output.get("failure_reason") == "db_unavailabe":
+      raise HTTPException(
+        status_code=503,
+        detail={
+          "message": "The database is temporarily unavailable. Try again shortly.",
+          "attempted_sql": output["sql"],
+        },
+      )
     raise HTTPException(
       status_code=422,
       detail={
         "message": "Couldn't create a query that validated and executed successfully.",
-        "attempted_sql": output["sql"]
-      }
+        "attempted_sql": output["sql"],
+      },
     )
 
   return GenerateResponse(sql=output["sql"], result=output["result"])  

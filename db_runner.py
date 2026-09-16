@@ -1,5 +1,6 @@
 import sqlite3
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from query_guard import guard_readonly
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
@@ -33,9 +34,11 @@ def execute_live(engine, query, timeout_seconds=5, readonly=True):
     try:
       return {"ok": True, "rows": future.result(timeout=timeout_seconds)}
     except FutureTimeoutError:
-      return {"ok": False, "error": "query timeout"}
+      return {"ok": False, "error_type": "timeout", "error": "query_timeout"}
+    except OperationalError as e:
+      return {"ok": False, "error_type": "db_unavailable", "error": str(e)}
     except Exception as e:
-      return {"ok": False, "error": str(e)}
+      return {"ok": False, "error_type": "query_error", "error": str(e)}
 
 def compare_execution(db_path, ac_sql, gen_sql):
   ac_res = execute_queries(db_path, ac_sql)

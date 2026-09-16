@@ -69,19 +69,25 @@ def generate_sql_query_with_retry(model, tokenizer, question, db_id, schema_look
 def generate_candidates(model, tokenizer, question, db_id, schema_lookup, db_path, n=5, executor=None, live_schema=None, dialect="sqlite",):
     run = executor or _eval_executor(db_path)
     candidates = []
+    failure_reasons = []
     
     for i in range(n):
         sql = generate_sql(model, tokenizer, question, db_id, schema_lookup, live_schema=live_schema,do_sample=True, temperature=0.7)
         if is_reasonable_query(sql, max_tables=8, dialect=dialect):
           is_valid, problems = validate_sql(sql, db_id, schema_lookup, dialect=dialect, live_schema=live_schema)
           if not is_valid:
+            failure_reasons.append("invalid_sql")
             continue
 
           result = run(sql)
           if result["ok"]:
              candidates.append({"sql": sql, "result": result["rows"]})
+          else:
+             failure_reasons.append(result.get("error_type", "query_error"))
+        else:
+           failure_reasons.append("unreasonable_query")        
 
-    return candidates    
+    return candidates, failure_reasons   
 
 def voting_candidates(candidates):
   if not candidates:
@@ -103,12 +109,18 @@ def generate_sql_final(model, tokenizer, question, db_id, schema_lookup, db_path
       "result": None} on the greedy-fallback path (nothing validated
       and executed successfully, so there's no result to report).
     """
-    candidates = generate_candidates(model, tokenizer, question, db_id, schema_lookup, db_path, n=n, executor=executor, live_schema=live_schema, dialect=dialect)
+    candidates, failure_reasons = generate_candidates(model, tokenizer, question, db_id, schema_lookup, db_path, n=n, executor=executor, live_schema=live_schema, dialect=dialect)
 
     if not candidates:
-        # nothing valid/executable at all — fall back to a plain greedy attempt,
-        # even if we already suspect it might fail, so we return SOMETHING
         fallback_sql = generate_sql(model, tokenizer, question, db_id, schema_lookup, live_schema=live_schema,do_sample=False)
-        return {"sql": fallback_sql, "result": None}
+        # If every single attempt failed specifically because the DB was
+        # unreachable, that's worth surfacing distinctly — not a generation
+        # problem, an infrastructure one.
+        db_unavailable = bool(failure_reasons) and all(r == "db_unavailable" for r in failure_reasons)
+        return {
+           "sql": fallback_sql,
+           "result": None,
+           "failure_reason": "db_unavailable" if db_unavailable else "generation_failed",
+           }
 
     return voting_candidates(candidates)
