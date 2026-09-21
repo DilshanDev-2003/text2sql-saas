@@ -23,3 +23,11 @@ def get_hf_token(env_var: str = "HF_TOKEN") -> str | None:
     than raising, so the caller decides whether that's a problem.
   """
   return os.environ.get(env_var)
+
+def get_wandb_api_key(env_var: str = "WANDB_API_KEY") -> str | None:
+  """
+    Reads a Weights & Biases API key from an environment variable, if set.
+    Like get_hf_token, a missing value isn't necessarily an error here —
+    the caller decides whether wandb logging is required or optional.
+  """
+  return os.environ.get(env_var)

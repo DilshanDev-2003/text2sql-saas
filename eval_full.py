@@ -1,7 +1,10 @@
 import json
+import os
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
+import wandb
 
+from config import get_wandb_api_key
 from model_loader import load_model
 from inference import generate_sql_final
 from db_runner import compare_execution
@@ -29,6 +32,7 @@ def get_dev_db_path(db_id):
     )
 
 CHECKPOINT_PATH = "/content/drive/MyDrive/text2sql-eval/full_eval_results.jsonl"  # adjust to your actual Drive path
+WANDB_RUN_ID_PATH = "/content/drive/MyDrive/text2sql-eval/wandb_run_id.txt"
 
 def load_already_done():
     """Returns the set of example indices already scored, so a resume skips them."""
@@ -41,12 +45,54 @@ def load_already_done():
         pass
     return done
 
-def run_full_eval(model, tokenizer, n=5, save_every=15):
+# WANDB Setup
+
+def init_wandb(n, total_examples):
+    """
+      Resumes the same wandb run across restarts using a run ID saved to
+      Drive, rather than starting a new disconnected run each time —
+      keeps one continuous history for the whole eval, however many
+      times it gets interrupted.
+    """
+    api_key = get_wandb_api_key()
+    if api_key:
+        wandb.login(key=api_key)
+
+    run_id = None
+    if os.path.exists(WANDB_RUN_ID_PATH):
+        with open(WANDB_RUN_ID_PATH) as f:
+            run_id = f.read().strip()
+
+    run = wandb.init(
+        project="text2sql-eval",
+        id=run_id,
+        resume="allow",
+        config={"n": n, "total_examples": total_examples},
+    )
+
+    if run_id is None:
+        with open(WANDB_RUN_ID_PATH, "w") as f:
+            f.write(run.id)
+
+    return run
+
+# Full Eval run
+
+def run_full_eval(model, tokenizer, n=5, save_every=15, rolling_window=50):
     schema_lookup = load_schema_lookup()
     dev_set = load_dev_set()
     already_done = load_already_done()
 
+    init_wandb(n, len(dev_set))
+
     print(f"Total examples: {len(dev_set)} | Already done: {len(already_done)}")
+
+    running_correct = already_done and sum(
+        1 for i in already_done  # cheap re-derivation isn't tracked here; rolling window resets fresh each session, which is fine — it's a recent-trend signal, not a cumulative one
+    ) or 0
+    recent_results = []
+    total_correct_so_far = 0
+    total_scored_so_far = 0
 
     buffer = []
     with open(CHECKPOINT_PATH, "a") as f:
@@ -77,6 +123,19 @@ def run_full_eval(model, tokenizer, n=5, save_every=15):
             }
             buffer.append(record)
 
+            recent_results.append(int(is_correct))
+            if len(recent_results) > rolling_window:
+                recent_results.pop(0)
+            total_scored_so_far += 1
+            total_correct_so_far += int(is_correct)
+
+            wandb.log({
+                "correct": int(is_correct),
+                "rolling_accuracy": sum(recent_results) / len(recent_results),
+                "cumulative_accuracy": total_correct_so_far / total_scored_so_far,
+                "examples_done": i + 1,
+            }, step=i)
+
             if len(buffer) >= save_every:
                 for r in buffer:
                     f.write(json.dumps(r) + "\n")
@@ -88,6 +147,8 @@ def run_full_eval(model, tokenizer, n=5, save_every=15):
             f.write(json.dumps(r) + "\n")
         f.flush()
 
+    wandb.finish()
+
 def summarize():
     total, correct = 0, 0
     with open(CHECKPOINT_PATH) as f:
@@ -95,4 +156,6 @@ def summarize():
             r = json.loads(line)
             total += 1
             correct += r["correct"]
-    print(f"{correct}/{total} = {100*correct/total:.2f}% execution accuracy")    
+    accuracy = 100 * correct / total
+    print(f"{correct}/{total} = {accuracy:.2f}% execution accuracy")
+    return accuracy

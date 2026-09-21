@@ -17,3 +17,5 @@ sqlalchemy
 sqlglot
 python-dotenv
 psycopg2-binary
+
+wandb
