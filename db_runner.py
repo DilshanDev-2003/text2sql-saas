@@ -47,4 +47,5 @@ def compare_execution(db_path, ac_sql, gen_sql):
   if gen_res is None or ac_res is None:
     return False
 
-  return set(gen_res) == set(ac_res)
+  # Sort by string representation, not raw value — raw values can mix
+  return sorted(ac_res, key=lambda row: [str(v) for v in row]) == sorted(gen_res, key=lambda row: [str(v) for v in row])

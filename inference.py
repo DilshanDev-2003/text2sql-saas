@@ -93,12 +93,15 @@ def voting_candidates(candidates):
   if not candidates:
     return None
 
-  result_counts = Counter(tuple(sorted(c["result"])) for c in candidates)
+  def sort_key(result):
+     return [str(v) for v in result]
+  
+  result_counts = Counter(tuple(sorted(c["result"], key=lambda v: str(v))) for c in candidates)
 
   most_common_result, count = result_counts.most_common(1)[0]
 
   for c in candidates:
-    if tuple(sorted(c["result"])) == most_common_result:
+    if tuple(sorted(c["result"], key=lambda v: str(v))) == most_common_result:
       return c
 
   return None    
