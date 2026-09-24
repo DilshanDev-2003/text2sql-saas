@@ -531,3 +531,27 @@ Closed out a genuinely long-standing open thread — the full dev-set eval was f
 **Genuinely useful outcome of this whole phase, worth stating plainly:** the original motivation (a single repeated question hallucinating a self-join) led to running the full eval, which led to discovering that self-joins were a minor issue but the eval methodology itself had a real, previously-unknown flaw inflating the failure count. Neither of those would have surfaced without doing the full run and the manual review — small-sample testing and automated-only analysis both would have missed it.
 
 **Not yet done, the natural next step:** the manual-review patterns above (missing joins, negation, schema confusion, stat-column misinterpretation, case sensitivity, implicit-qualifier inconsistency) are now real, concrete, evidence-backed candidates for a second contrastive-training round, unlike the earlier self-join-only plan. Worth reviewing a larger sample (or all 298, time permitting) before finalizing which patterns to target, and worth deciding whether case-sensitivity specifically might be better solved as a `COLLATE NOCASE` normalization step rather than a training fix at all.
+
+---
+
+## 19. Phase 15 — API Layer, Continued (health check + request logging)
+
+Picked back up on the API-layer work from Phase 13, deliberately choosing to finish it before starting Authentication — reasoning: auth's job is to control who can call which endpoints, and the endpoint surface was still evolving; better to let the API settle first than wire auth around something that might still change shape.
+
+**Decision on ordering, made explicitly before building anything:** a real `/health` check first (fastest win, and directly addresses a real pain point from earlier sessions — multiple times this project genuinely couldn't tell "stuck" from "just slow"), then structured logging (foundational visibility, makes everything after easier to debug), then rate limiting last (matters once there's real traffic, not urgent solo). Rate limiting explicitly deferred, not built this session.
+
+**1. Real `/health` check (edit to `app.py`).**
+
+Previously a static `{"status": "ok"}` regardless of anything actually being true. Now verifies both the model and the live DB connection are genuinely usable — `_model_loaded_and_ready()` (calls `get_model_and_tokenizer()`, catches the `RuntimeError` it raises if the model never loaded) and `_db_reachable()` (a cheap `SELECT 1` against `_engine`, not a full query).
+
+**Deliberate design choice: returns `200` even when degraded**, with `status: "degraded"` and per-component detail in the body, rather than a `503`. Reasoning: many monitoring/uptime tools treat any non-`200` as "the whole endpoint is down" without reading the response body — a `503` here would look identical to a full outage, when the server is actually up and specifically *able* to report what's wrong. Confirmed working live: `{"status":"ok","model":"ok","database":"ok"}`.
+
+**2. Structured request logging (new file: `request_logger.py`; edit to `app.py`).**
+
+Previously, the only record of `/generate` activity was whatever scrolled past in Colab's cell output — not searchable, not persistent, gone on runtime reset. Now every `/generate` call (success or failure) writes one JSON line to a file on Google Drive (same durable pattern as the eval checkpoints): timestamp, question, `n`, duration, status code, and either the generated SQL or an error tag.
+
+**Deliberate omission, explained rather than just done:** the log does **not** include the query's actual result data (the returned rows) — only the SQL and metadata. Reasoning: a request log is for operational visibility (volume, latency, failure patterns), not long-term data storage; logging real customer query results by default, once real databases are involved, would be a privacy habit worth not starting in the first place. Can be added deliberately later if a genuine debugging need for it ever arises.
+
+**Result: two of three planned API-layer items done this phase** (`/health`, request logging); rate limiting scoped but explicitly left for a future session, once real traffic or a public demo makes it more clearly worth building now rather than later.
+
+**Next roadmap item, whenever picked back up:** Authentication — now has a more settled API surface to protect (`/generate`, `/schema`, `/health`), which was the whole reason this was sequenced before it.
