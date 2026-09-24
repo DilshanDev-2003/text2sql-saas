@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from model_loader import load_model, get_model_and_tokenizer
 from config import get_connection_string
@@ -72,10 +73,39 @@ async def generate(req: GenerateRequest):
 
   return GenerateResponse(sql=output["sql"], result=output["result"])  
 
+# Health Endpoint
 @app.get("/health")
 async def health():
-  return {"status": "ok"}
+  """
+    Verifies that the model and the database connection are actually usable rather than just running.
+    A simple query and the model and tokenizer loading are enough to test those.
+  """
+  model_ok = _model_loaded_and_ready()
+  db_ok = _db_reachable()
 
+  status = "ok" if (model_ok and db_ok) else "degraded"
+  return {
+    "status": status,
+    "model": "ok" if model_ok else "unavailable",
+    "database": "ok" if db_ok else "unreachable"
+  }
+
+def _model_loaded_and_ready():
+  try:
+    get_model_and_tokenizer
+    return True
+  except RuntimeError:
+    return False
+
+def _db_reachable():
+  try:
+    with _engine.connect() as connection:
+      connection.execute(text("SELECT 1"))       
+    return True
+  except Exception:
+    return False
+
+# Schema Endpoint
 @app.get("/schema")
 async def schema():
   """

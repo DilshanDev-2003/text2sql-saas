@@ -405,3 +405,129 @@ A leftover `uvicorn` process (from an earlier attempt in the same long session) 
 - `test_inference.py`'s monkeypatched stubs don't exercise real argument-passing between `generate_sql` and `validate_sql` calls, nor real SQLAlchemy row shapes — both gaps that let real bugs through to manual testing this session. Worth strengthening later, not urgent.
 
 **Next roadmap item:** API layer / interface for the product — `app.py` already is a FastAPI service, so this is less "start from scratch" and more "expand `/generate` into a real API surface" (multiple endpoints, request/response contracts beyond a single route, etc.) — exact scope not yet defined.
+
+---
+
+## 17. Phase 13 — API Layer (in progress)
+
+**Scoping decision, made deliberately before writing any code:** considered building support for multiple database connections as part of "API layer," but decided against it — multi-DB support is really what Multi-tenant data isolation (a separate, later roadmap item) requires, and designing it now, before auth/tenancy exist to give it real constraints, would mean designing it twice. Kept the single-connection-at-startup model as-is; scoped this phase narrowly to making what already exists genuinely API-shaped instead.
+
+**1. `/schema` endpoint (new).**
+
+Returns `get_live_schema()`'s output as-is (tables, columns with types, primary keys, foreign keys) rather than a separate "simplified for API" shape — deliberately, to avoid maintaining two schema representations that could drift out of sync. Real use cases identified for this: a future frontend showing available tables/columns before a user asks a question, debugging (checking what the live schema actually looks like without digging through Colab logs), and future transparency for a customer confirming their DB was introspected correctly. Confirmed working live — returns the `singer` table's full structure correctly.
+
+**2. `/generate` failure-mode redesign — three distinct outcomes instead of one generic 500.**
+
+Previously: any failure at all returned a bare `500` with `str(e)` as the detail — leaking raw internals (file paths, library specifics) and not distinguishing *why* something failed.
+
+Redesigned into three cases:
+- **`200`** — a real, validated, executed answer (unchanged from before).
+- **`422`** — `generate_sql_final`'s fallback branch fired: every one of `n` candidates failed to validate and/or execute. Response includes `attempted_sql` (the final greedy attempt) so the caller has something to debug with, even though it wasn't trustworthy enough to execute.
+- **`503`** — new: specifically when *every* candidate failed **because the database itself was unreachable** (not because the SQL was wrong). Distinguished from `422` because these mean different things to a caller — "rephrase your question" vs. "this isn't your fault, try again shortly."
+
+Also replaced the generic-exception handler's `detail=str(e)` with a fixed, safe message — decided deliberately as a security habit to start now rather than retrofit later, even though today there's no real caller besides the developer testing manually.
+
+**Implementing the 422/503 distinction required threading failure reasons further through the call chain than they previously went, since the information existed but was being discarded:**
+
+- **`db_runner.py`** — `execute_live` now catches `sqlalchemy.exc.OperationalError` specifically (connection-level failures) before the generic `Exception` catch-all, and returns an `error_type` field (`"timeout"` / `"db_unavailable"` / `"query_error"`) alongside the existing `error` message, instead of every failure looking identical.
+- **`inference.py`** — `generate_candidates` previously discarded *why* each candidate failed (`continue` with nothing recorded). Now tracks a `failure_reasons` list alongside `candidates`, and **returns a tuple `(candidates, failure_reasons)` instead of a plain list** — a real breaking change to its return type. `generate_sql_final` (the only caller) updated accordingly; if every recorded failure reason is `"db_unavailable"`, its fallback response now includes `"failure_reason": "db_unavailable"` so `/generate` can act on it.
+- **`app.py`** — checks `output.get("failure_reason")` and returns `503` vs `422` accordingly.
+
+**Test suite run after the change: 43/43 passing**, including with the `generate_candidates` return-type change — no regressions.
+
+**Honest limitation, stated plainly rather than glossed over:** the `503` path is logically verified (covered by the passing test suite, which mocks the failure) but **not live-tested against a real database outage** — deliberately not attempted, since forcing Neon to actually become unreachable mid-request isn't easy or safe to simulate against the real test DB without deliberately breaking the connection string and paying the cost of reloading the model afterward. Flagged as a real gap rather than claimed as proven.
+
+**Regression-tested the normal path after all changes** — same `n=5` question that succeeded in Phase 12 still returns a correct `200` after the sync. Confirmed the three-outcome redesign didn't disturb the working case.
+
+**3. Real generation-quality gap surfaced by repeated manual testing — not a bug in today's work, but worth recording precisely.**
+
+Running the *exact same* question (`"average age of singers from France"`, `n=5`) twice in a row: one run returned the correct answer (`29.0`); a second run returned an *incorrect but fully executable* answer (`32.0`) from a self-join (`JOIN singer AS T2 ON T1.country = 'France'`) that never actually links `T1`/`T2` by a shared key — schema-valid (real table, real columns), so it passes validation; executes without error, so it doesn't trigger either the `422` or `503` paths built today. Confirmed as sampling variance (`temperature=0.7` on the non-greedy candidates), not a code defect — a third run returned the correct answer again.
+
+**Discussed directly: is this solvable, and by what?** Concluded it is *not* fully solvable — a fundamental characteristic of LLM generation, not a bug to patch away — but meaningfully reducible. Real candidate approaches, none built yet:
+- **More targeted contrastive training data**, continuing Phase 5's proven method (26 hand-written pairs fixed 7/44 targeted failures then) — this time aimed specifically at self-joins missing an actual join-key condition.
+- **A confidence threshold on self-consistency voting** — currently the majority wins even at something like 3-out-of-5; requiring a stronger majority (or returning "uncertain" below some threshold) would trade some answered questions for fewer *confidently wrong* ones.
+- **A structural sanity check in `schema_validation.py`** — flagging a self-join with no actual shared key between the two sides, independent of any model retraining.
+- **Completing the full 1034-example Spider eval**, still never done for any checkpoint (flagged as an open thread since Phase 8) — needed to know whether this is a 2% problem or a 20% problem, rather than reasoning from two manual repetitions of one question.
+
+**Explicitly clarified: RAG-based schema retrieval does not address this.** RAG solves a different problem (a schema too large to fit in the prompt at all); the test schema here is a single table, so RAG has no bearing on this specific failure mode. Worth remembering so it isn't mistakenly treated as the fix later.
+
+**Carried-forward, explicitly not solved today:**
+- The `503` db-unavailable path needs a genuine live test at some point, not just a mocked one.
+- The self-join/wrong-but-executable answer class of failure is unaddressed — noted above as a real, now concretely-demonstrated gap for the Generation Quality roadmap items, not something this phase's scope covered.
+- Multi-DB connection support remains deliberately deferred to when Authentication/Multi-tenant data isolation are tackled, per this phase's opening scoping decision.
+
+---
+
+## 18. Phase 14 — The Full 1034-Example Spider Eval (finally completed)
+
+Closed out a genuinely long-standing open thread — the full dev-set eval was flagged as never-completed as far back as Phase 8, with every prior accuracy number (checkpoint-122's 70.67%, checkpoint-270's 71.33%, the 72.00% with voting) coming from a 150-example or 50-example sample instead.
+
+**Motivation for finally running it now:** the Phase 13 self-join incident (same question, same settings, correct one run and wrong-but-executable the next) raised the direct question "is this worth fixing via retraining?" — answerable only with a real failure rate across a representative dataset, not two repetitions of one question.
+
+**Rebuilt the eval loop from scratch**, since the original lived only in ad-hoc Colab cells and predated the Phase 8 restructure into `inference.py`. Data sources (recovered from memory of the original approach, not rediscovered):
+- `xlangai/spider` / `dreamerdeo/multispider`'s `dataset/spider/dev.json` — the 1034 dev questions + gold SQL.
+- `richardr1126/spider-schema` — `schema_lookup`, same shape used throughout the project.
+- `dreamerdeo/multispider`'s per-`db_id` `.sqlite` files, fetched on demand via `hf_hub_download`.
+
+**New file: `eval_full.py`** — a checkpointed loop calling `inference.generate_sql_final` (the real, current production code path) against each dev example, scoring via `db_runner.compare_execution`. Checkpoints every 15 examples to a `.jsonl` file on Google Drive (not local Colab storage, which is wiped on disconnect) — resumable by design: `load_already_done()` reads already-scored indices from the checkpoint file and the loop skips them on restart, rather than resuming from an in-memory position that a disconnect would destroy.
+
+**Added Weights & Biases logging**, on request — a new `get_wandb_api_key()` in `config.py` (same optional-env-var pattern as `get_hf_token()`), plus per-example logging of rolling (last-50) and cumulative accuracy. Used a **fixed run ID persisted to Drive** so a resumed run continues the same wandb run/chart rather than fragmenting into a new disconnected one each time it restarts.
+
+**A genuine bug surfaced mid-run, handled safely by design:** `'<' not supported between instances of str and int'` — `compare_execution` (`db_runner.py`) and `voting_candidates` (`inference.py`) both used `sorted()` directly on raw SQL result rows, which crashes when a result set mixes types (e.g. a `NULL`/`None` next to a real number) that Python can't compare directly. The per-example `try/except` in `run_full_eval` caught this safely and the loop kept going — exactly as designed — but it meant 2 examples (433, 434) were scored `correct: False` purely due to the crash, not genuine model failure.
+
+**Fix:** both functions now sort by each value's `str()` representation instead of the raw value — every value becomes comparable regardless of type, while still correctly grouping identical rows for the equality check.
+
+**New file: `rerun_failed.py`** — rather than re-running the full 1034 examples again after the fix (a multi-hour cost for a 2-example bug), identifies exactly the checkpoint records with `generated_sql: None` (the crash signature) and re-scores only those. Confirmed working: both index 433 and 434 flipped to `correct: True` after the fix, at zero cost to the other 1032 already-correct results.
+
+**Operational realities hit during the run, consistent with — and validating — the original NOTES.md lesson from Phase 6:**
+- Colab's **daily** free-tier GPU quota (distinct from, and often tighter than, the per-session time limit) was hit partway through, around 4h34m/705 examples in. Resumed cleanly the next session via the checkpoint file with zero lost progress — the entire reason this architecture was built this way.
+- Actual per-example pace observed: roughly 20-30 seconds at `n=5`, putting the true full-run cost at **6-8 hours of GPU time**, confirming the earlier estimate was in the right range.
+
+**Final result: 673/1034 = 65.09% execution accuracy** (post-sort-fix; 64.89% before it, from the same run with 2 examples miscounted).
+
+**This is meaningfully lower than every prior small-sample estimate:**
+
+| Measurement | Accuracy |
+|---|---|
+| 150-sample (checkpoint-270, retry only) | 71.33% |
+| 50-sample (+ validation + voting) | 72.00% |
+| **Full 1034-sample (this run)** | **65.09%** |
+
+**Real, useful takeaway:** small samples were optimistic — not wrong exactly, but not representative either. 65.09% was, at this point, treated as the trustworthy baseline — superseded later in this same phase, see below.
+
+**Automated failure-breakdown analysis (`analyze_failures.py`, new file):** classified all 361 failures by re-executing each `generated_sql` against its real database (no GPU needed, just DB lookups) into three buckets: `no_valid_query` (fallback fired, nothing validated/executed), `invalid_sql` (a query exists but errors on execution), and `valid_but_wrong` (executes cleanly, wrong answer). Also added a heuristic (`is_suspected_spurious_self_join`, via `sqlglot`) specifically flagging the Phase 13 self-join pattern — same table joined to itself with no equality condition actually linking the two aliases.
+
+**Result: `valid_but_wrong__other`: 298 (82.5% of failures, 28.8% of total); `invalid_sql`: 41 (11.4%/4.0%); `suspected_spurious_self_join`: 22 (6.1%/2.1%).**
+
+**Important correction to the Phase 13 conclusion:** the self-join pattern that motivated running the full eval in the first place turned out to be a **small slice** — only 2.1% of the whole dataset. The dominant problem is the large, uncategorized 298-example `valid_but_wrong__other` bucket. Decided **not** to pursue a dedicated contrastive-training round for self-joins specifically, since that would target 2% of the problem while 28.8% sat unexamined — instead, moved to manual review of a sample from that bucket, the same method Phase 3 originally used (review a subset, look for recurring patterns by eye).
+
+**Manual review (`sample_for_review.py`, new file — reproducible random sample via a fixed seed): 30 examples reviewed by hand, question/gold/generated SQL side by side.** Real findings, going well beyond what any automated heuristic could categorize:
+
+- **Missing/skipped joins** (Phase 3 pattern #1, still present) — e.g. counting rows of the wrong table because a needed join was dropped entirely (indices 161, 222, 931), or skipping an intermediate junction table in a many-to-many relationship (402).
+- **Negation errors** (Phase 3 pattern #2, still present, three distinct flavors) — answering the positive version of a negated question (62); applying `NOT IN` at the wrong grain so the condition becomes vacuously true (66); and one genuinely concerning case — hardcoding a guessed literal ID (`WHERE petid = 3`) instead of writing the real subquery-based filter (63), a hallucinated shortcut rather than a reasoning error.
+- **Schema confusion between similar-purpose columns** (Phase 3 pattern #3, still present) — e.g. filtering on `Region` when the question meant `Continent` (725), or grouping by an ID column instead of the name column with the same conceptual meaning (446).
+- **New pattern, not in the original Phase 3 list — misinterpreting an existing "stat" column as needing aggregation.** When a column is already named for the exact thing being asked (`tours`, `average`), the model sometimes wraps it in `COUNT`/`AVG` anyway instead of just selecting the column directly (459, 16).
+- **New pattern — inconsistent handling of an implicit qualifier.** The same concept ("official" language) handled oppositely wrong in two different examples: adding an unrequested filter in one case (756), dropping a required one in another (754).
+- **New pattern — case-sensitivity on string literals.** Logic otherwise correct, but a literal like `'math'` vs. the DB's actual `'Math'` silently returns an empty/wrong result under SQLite's case-sensitive string comparison (404, 361).
+- **A smaller, murkier bucket of likely benchmark/gold ambiguity, not clearly model error** (960, 500, possibly 232/230) — e.g. "the youngest dog" reasonably means minimum age, but gold's own SQL uses `max(age)`; "most total injuries" reasonably could mean `SUM(killed)`, but gold uses `COUNT(*)`. Flagged as genuinely ambiguous rather than confidently miscounted either way.
+
+**The most consequential finding, though, was about the eval methodology itself, not the model:** roughly **1 in 6** of the reviewed failures (128, 80, 417, 628, 617) were cases where the generated SQL was **logically identical to gold** — same values, same meaning — just with **SELECT columns in a different order**. `compare_execution`'s strict positional-tuple comparison was scoring these as wrong. This wasn't a rare edge case in the sample; it was one of the single most common "failure" reasons observed.
+
+**Fix — `db_runner.py`'s `compare_execution` and `inference.py`'s `voting_candidates`, both changed to compare rows as order-independent value sets** (values stringified and sorted within each row, then rows sorted against each other) instead of strict positional tuples. Explicit, acknowledged trade-off: this can occasionally produce a **false positive** if two genuinely different result rows happen to contain the same values in a different arrangement — accepted as the right call given how much more common the column-order false-negative problem turned out to be.
+
+**New file: `rescore_all.py`** — re-scores every already-completed example from the checkpoint file using the fixed comparison, without any GPU or regeneration — pure re-evaluation of already-generated SQL against the real databases.
+
+**Result: 39 examples flipped (30 false→true, 9 true→false)** — confirming both sides of the trade-off actually happened in practice, not just in theory. Net **+21 correct**.
+
+**Final, corrected result — the number to treat as the real baseline going forward: 694/1034 = 67.12%.**
+
+| Measurement | Accuracy |
+|---|---|
+| 150-sample (checkpoint-270, retry only) | 71.33% |
+| 50-sample (+ validation + voting) | 72.00% |
+| Full 1034-sample, original strict comparison | 65.09% |
+| **Full 1034-sample, corrected comparison** | **67.12%** |
+
+**Genuinely useful outcome of this whole phase, worth stating plainly:** the original motivation (a single repeated question hallucinating a self-join) led to running the full eval, which led to discovering that self-joins were a minor issue but the eval methodology itself had a real, previously-unknown flaw inflating the failure count. Neither of those would have surfaced without doing the full run and the manual review — small-sample testing and automated-only analysis both would have missed it.
+
+**Not yet done, the natural next step:** the manual-review patterns above (missing joins, negation, schema confusion, stat-column misinterpretation, case sensitivity, implicit-qualifier inconsistency) are now real, concrete, evidence-backed candidates for a second contrastive-training round, unlike the earlier self-join-only plan. Worth reviewing a larger sample (or all 298, time permitting) before finalizing which patterns to target, and worth deciding whether case-sensitivity specifically might be better solved as a `COLLATE NOCASE` normalization step rather than a training fix at all.
