@@ -3,11 +3,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import text
+import time
 
 from model_loader import load_model, get_model_and_tokenizer
 from config import get_connection_string
 from inference import generate_sql_final, _live_executor
 from db_connection import get_engine, get_live_schema, get_sqlglot_dialect
+from request_logger import log_request
 
 _engine = None
 _live_schema = None
@@ -41,6 +43,8 @@ class GenerateResponse(BaseModel):
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest):
   model, tokenizer = get_model_and_tokenizer()
+  start = time.time()
+
   try: 
     output = await run_in_threadpool(
       generate_sql_final,
@@ -52,10 +56,15 @@ async def generate(req: GenerateRequest):
       n=req.n,
     )    
   except Exception as e:
+    duration = start - time.time()
+    log_request(req.question, req.n, duration, 500, error="unexpected_erre")
     raise HTTPException(status_code=500, detail="Something went wrong while generating a response.")
+
+  duration = start - time.time()
 
   if output["result"] is None:
     if output.get("failure_reason") == "db_unavailabe":
+      log_request(req.question, req.n, duration, 503, sql=output["sql"], error="db_unavailable")
       raise HTTPException(
         status_code=503,
         detail={
@@ -63,6 +72,7 @@ async def generate(req: GenerateRequest):
           "attempted_sql": output["sql"],
         },
       )
+    log_request(req.question, req.n, duration, 422, sql=output["sql"], error="generation_failed")
     raise HTTPException(
       status_code=422,
       detail={
@@ -71,6 +81,7 @@ async def generate(req: GenerateRequest):
       },
     )
 
+  log_request(req.question, req.n, duration, 200, sql=output["sql"])
   return GenerateResponse(sql=output["sql"], result=output["result"])  
 
 # Health Endpoint
