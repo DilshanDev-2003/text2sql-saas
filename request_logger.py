@@ -13,7 +13,7 @@ def log_request(question, n, duration_seconds, status_code, sql=None, error=None
     "timestamp": time.time(),
     "question": question,
     "n": n,
-    "duration_seconds": duration_seconds,
+    "duration_seconds": round(duration_seconds, 2),
     "status_code": status_code,
     "sql": sql,
     "error": error,
