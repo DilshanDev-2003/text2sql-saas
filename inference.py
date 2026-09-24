@@ -93,15 +93,18 @@ def voting_candidates(candidates):
   if not candidates:
     return None
 
-  def sort_key(result):
-     return [str(v) for v in result]
-  
-  result_counts = Counter(tuple(sorted(c["result"], key=lambda v: str(v))) for c in candidates)
+  def normalize(result):
+    return tuple(sorted(str(v) for v in row) for row in sorted(tuple(sorted(str(v) for v in row)) for row in result))
 
+  # simpler, equivalent: build each row's signature once, reuse it
+  def row_signature(result):
+    return tuple(sorted(tuple(sorted(str(v) for v in row)) for row in result))
+
+  result_counts = Counter(row_signature(c["result"]) for c in candidates)
   most_common_result, count = result_counts.most_common(1)[0]
 
   for c in candidates:
-    if tuple(sorted(c["result"], key=lambda v: str(v))) == most_common_result:
+    if row_signature(c["result"]) == most_common_result:
       return c
 
   return None    

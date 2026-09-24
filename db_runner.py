@@ -47,5 +47,15 @@ def compare_execution(db_path, ac_sql, gen_sql):
   if gen_res is None or ac_res is None:
     return False
 
-  # Sort by string representation, not raw value — raw values can mix
-  return sorted(ac_res, key=lambda row: [str(v) for v in row]) == sorted(gen_res, key=lambda row: [str(v) for v in row])
+  def normalize(rows):
+    """
+      Sorts values *within* each row (so column order doesn't matter)
+      and then sorts the rows themselves (so row order doesn't matter
+      either). Values are stringified first, same reasoning as the
+      earlier sorting fix — keeps mixed types (e.g. None next to an
+      int) comparable.
+    """
+    row_signatures = [tuple(sorted(str(v) for v in row)) for row in rows]
+    return sorted(row_signatures)
+
+  return normalize(ac_res) == normalize(gen_res)
