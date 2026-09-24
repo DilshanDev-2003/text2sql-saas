@@ -18,6 +18,6 @@ def log_request(question, n, duration_seconds, status_code, sql=None, error=None
     "sql": sql,
     "error": error,
   }
-  Path(LOG_PATH).parent.mkdir(parent=True, exist_ok=True)
+  Path(LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
   with open(LOG_PATH, "a") as f:
     f.write(json.dumps(record) + "\n")
