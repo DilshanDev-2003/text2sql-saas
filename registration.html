@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Registration Form - 232287</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="registration-page">
+    <main class="form-container">
+        <h1>Create an Account</h1>
+        <p>
+            Complete the form below to create your account
+            and provide your contact information.
+        </p>
+
+        <form
+            class="registration-form"
+            action="process.php"
+            method="post"
+            enctype="multipart/form-data">
+
+            <fieldset class="form-section">
+                <legend>Personal Information</legend>
+
+                <div class="form-group">
+                    <label for="name">
+                        Full Name:
+                        <span class="required-indicator">*</span>
+                    </label>
+                    <input
+                        type="text"
+                        id="name"
+                        name="name"
+                        minlength="3"
+                        maxlength="50"
+                        placeholder="Enter your full name"
+                        required>
+                </div>
+
+                <div class="form-group">
+                    <label for="email">
+                        Email Address:
+                        <span class="required-indicator">*</span>
+                    </label>
+                    <input
+                        type="email"
+                        id="email"
+                        name="email"
+                        placeholder="name@example.com"
+                        required>
+                </div>
+
+                <div class="form-group">
+                    <label for="password">
+                        Password:
+                        <span class="required-indicator">*</span>
+                    </label>
+                    <input
+                        type="password"
+                        id="password"
+                        name="password"
+                        minlength="6"
+                        required>
+                    <small class="form-help">
+                        Password must contain at least 6 characters.
+                    </small>
+                </div>
+
+                <div class="form-group">
+                    <label for="age">Age:</label>
+                    <input
+                        type="number"
+                        id="age"
+                        name="age"
+                        min="18"
+                        max="100">
+                </div>
+
+                <div class="form-group">
+                    <label for="birthdate">Date of Birth:</label>
+                    <input
+                        type="date"
+                        id="birthdate"
+                        name="birthdate">
+                </div>
+
+                <div class="form-group">
+                    <label for="phone">Telephone:</label>
+                    <input
+                        type="tel"
+                        id="phone"
+                        name="phone"
+                        placeholder="0771234567">
+                </div>
+            </fieldset>
+
+            <fieldset class="form-section">
+                <legend>Contact Preferences</legend>
+                <p>Preferred Contact Method:</p>
+
+                <div class="choice-group">
+                    <label class="choice">
+                        <input
+                            type="radio"
+                            name="contact_method"
+                            value="email"
+                            required>
+                        Email
+                    </label>
+                    <label class="choice">
+                        <input
+                            type="radio"
+                            name="contact_method"
+                            value="phone">
+                        Phone
+                    </label>
+                </div>
+            </fieldset>
+
+            <fieldset class="form-section">
+                <legend>Interests</legend>
+                <p>Select the topics you are interested in:</p>
+
+                <div class="choice-group">
+                    <label class="choice">
+                        <input
+                            type="checkbox"
+                            name="interests[]"
+                            value="technology">
+                        Technology
+                    </label>
+                    <label class="choice">
+                        <input
+                            type="checkbox"
+                            name="interests[]"
+                            value="travel">
+                        Travel
+                    </label>
+                    <label class="choice">
+                        <input
+                            type="checkbox"
+                            name="interests[]"
+                            value="education">
+                        Education
+                    </label>
+                </div>
+            </fieldset>
+
+            <fieldset class="form-section">
+                <legend>Message Information</legend>
+
+                <div class="form-group">
+                    <label for="subject">
+                        Subject:
+                        <span class="required-indicator">*</span>
+                    </label>
+                    <select id="subject" name="subject" required>
+                        <option value="">Select a subject</option>
+                        <option value="general">General Inquiry</option>
+                        <option value="feedback">Feedback</option>
+                        <option value="collaboration">Collaboration</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="message">
+                        Message:
+                        <span class="required-indicator">*</span>
+                    </label>
+                    <textarea
+                        id="message"
+                        name="message"
+                        rows="6"
+                        minlength="10"
+                        maxlength="500"
+                        placeholder="Enter your message here"
+                        required></textarea>
+                </div>
+            </fieldset>
+
+            <div class="form-group">
+                <label for="attachment">Attach a File:</label>
+                <input
+                    type="file"
+                    id="attachment"
+                    name="attachment"
+                    accept=".pdf,.jpg,.jpeg,.png">
+            </div>
+
+            <div class="form-group">
+                <label for="rating">Rate your experience:</label>
+                <input
+                    type="range"
+                    id="rating"
+                    name="rating"
+                    min="1"
+                    max="10"
+                    value="5">
+            </div>
+
+            <div class="form-group">
+                <label for="color">Choose your favourite colour:</label>
+                <input
+                    type="color"
+                    id="color"
+                    name="color">
+            </div>
+
+            <div class="form-actions">
+                <button class="button button-primary" type="submit">
+                    Send Message
+                </button>
+                <button class="button button-secondary" type="reset">
+                    Clear Form
+                </button>
+                <button class="button button-secondary" type="button">
+                    Click Me
+                </button>
+            </div>
+        </form>
+    </main>
+</body>
+</html>
