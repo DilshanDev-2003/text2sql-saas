@@ -57,7 +57,7 @@ async def generate(request: Request, response: Response, req: GenerateRequest):
     duration = time.time() - start
     log_request(req.question, req.n, duration, 503, error="gpu_busy")
     raise HTTPException(
-      status_code==503,
+      status_code=503,
       detail="The server is busy processing another request.Try again shortly.",
       headers={"Retry-After": "5"},
     )
