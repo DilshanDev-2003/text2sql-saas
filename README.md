@@ -4,7 +4,7 @@ A text-to-SQL system: given a natural language question and a database schema, g
 
 ## Status
 
-Actively in development. Core generation pipeline (fine-tuned model + schema validation + majority-vote consistency checking) is built and tested. Live database connectivity and model serving as a persistent API are both built and confirmed working end-to-end against a real database. The API layer has a live-schema endpoint, a real health check, and structured request logging; rate limiting is scoped but not yet built. Broader production concerns (authentication, multi-tenant security, RAG-based schema retrieval, multi-dialect SQL beyond Postgres) are deliberately not yet built — see [Roadmap](#roadmap).
+Actively in development. Core generation pipeline (fine-tuned model + schema validation + majority-vote consistency checking) is built and tested. Live database connectivity and model serving as a persistent API are both built and confirmed working end-to-end against a real database. The API layer is complete: a live-schema endpoint, a real health check, structured request logging, and rate limiting (per-IP request limits plus a GPU concurrency guard) are all built and confirmed working. Broader production concerns (authentication, multi-tenant security, RAG-based schema retrieval, multi-dialect SQL beyond Postgres) are deliberately not yet built — see [Roadmap](#roadmap).
 
 ## How it works
 
@@ -13,13 +13,14 @@ Actively in development. Core generation pipeline (fine-tuned model + schema val
 3. Each candidate is checked against the real schema (`schema_validation.py`) — catches hallucinated column/table names before ever touching a database.
 4. Surviving candidates are executed (`db_runner.py`) via a pluggable executor — either safely against a SQLite eval file with a timeout, or against a live database with both read-only enforcement and a timeout (`query_guard.py`).
 5. If multiple candidates were generated, the most self-consistent answer wins — the SQL whose *result* the most candidates agree on, not just the first one that happened to run (`inference.py`). The winning SQL and its result are both returned as JSON; every `/generate` call is also logged (question, duration, outcome — not result data) for operational visibility.
-6. `GET /health` reports whether the model and live database connection are both genuinely usable, not just whether the process is running.
+6. `GET /health` reports whether the model and live database connection are both genuinely usable, not just whether the process is running. Every route except `/health` is rate-limited per client, and `/generate` additionally enforces a GPU concurrency limit — an excess request is rejected immediately with `503` rather than queued.
 
 ## Project structure
 
 | File | Responsibility |
 |---|---|
-| `app.py` | The FastAPI service. Loads the model and connects to the live database once at startup; exposes `POST /generate`, `GET /schema`, and `GET /health`. |
+| `app.py` | The FastAPI service. Loads the model and connects to the live database once at startup; exposes `POST /generate`, `GET /schema`, and `GET /health`; enforces rate limiting and GPU concurrency limits. |
+| `rate_limit.py` | Per-IP request rate limiting (`slowapi`) and a GPU concurrency guard (`asyncio.Semaphore`) — both keyed to be swappable once authentication exists. |
 | `model_loader.py` | Loads the fine-tuned model (base model + LoRA adapter, 4-bit quantized) once as a singleton, for reuse across every request. |
 | `request_logger.py` | Writes one structured JSON line per `/generate` call (question, duration, status, outcome) to a durable log file — not the query's result data, deliberately. |
 | `schema_validation.py` | Checks if generated SQL only references real tables/columns. Works against a static (Spider) schema or a live database schema. No model needed either way. |
@@ -98,7 +99,7 @@ Being built incrementally, driven by actual need rather than upfront completenes
 ### Deployment Readiness (required before launch — not deferred)
 - [x] Live database connectivity (SQLAlchemy-based, any engine)
 - [x] Model serving as a persistent API service (not notebook-based)
-- [ ] API layer / interface for the product — `/schema`, error handling (422/503), a real `/health` check, and request logging are done; rate limiting is scoped but not yet built
+- [x] API layer / interface for the product — `/schema`, error handling (422/503), a real `/health` check, request logging, and rate limiting (per-IP + GPU concurrency) are all done
 - [ ] Authentication — **up next**
 - [ ] Multi-tenant data isolation
 - [ ] Semantic-layer term authoring (usable without writing Python)

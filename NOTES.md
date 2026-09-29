@@ -555,3 +555,52 @@ Previously, the only record of `/generate` activity was whatever scrolled past i
 **Result: two of three planned API-layer items done this phase** (`/health`, request logging); rate limiting scoped but explicitly left for a future session, once real traffic or a public demo makes it more clearly worth building now rather than later.
 
 **Next roadmap item, whenever picked back up:** Authentication — now has a more settled API surface to protect (`/generate`, `/schema`, `/health`), which was the whole reason this was sequenced before it.
+
+## 20. Phase 16 — API Layer: Rate Limiting (closed out)
+
+Last item of the three-part API-layer phase (`/health` and request logging closed out in Phase 15). Two separate protections, deliberately not conflated:
+
+- **Request rate limiting** — protects against one client flooding the API.
+- **GPU concurrency limiting** — protects the GPU itself, flagged as an open gap since Phase 11/12.
+
+**Design decision: keyed by IP for now, not by API key.** Authentication doesn't exist yet, so IP is the only identity available. The key-extraction logic was deliberately isolated into its own function (`client_key()` in a new `rate_limit.py`) so that switching to per-API-key limiting once auth lands is a one-line change, not a rewrite of every route.
+
+**1. Request rate limiting — `slowapi`.**
+
+Chosen over hand-rolling a limiter (sliding-window/cleanup edge cases are a classic self-inflicted bug) and over a token-bucket algorithm (the industry favorite for bursty traffic, but overkill before there's real traffic to be bursty). Fixed/moving window via `slowapi` is the right amount of engineering for the current stage.
+
+- New `rate_limit.py`: `client_key()` (IP-based), `limiter = Limiter(key_func=client_key, headers_enabled=True)`.
+- New `config.get_rate_limit()` — same optional-env-var pattern as `get_hf_token()`/`get_wandb_api_key()`, but with a required default so the server runs with sane limits even when unconfigured.
+- `/generate`: `10/minute` (GPU-costly). `/schema`: `60/minute` (cheap read). `/health`: unlimited, since uptime monitors must never be rate-limited.
+- `429` responses carry a `Retry-After` header — the standard contract clients expect. Confirmed live: requests 1–60 to `/schema` returned `200`, request 61 returned `429` with `Retry-After: 60`.
+
+**Bug hit: `"60/min"` instead of `"60/minute"`.** `slowapi` (via the `limits` package) only recognizes full unit words (`second`/`minute`/`hour`/`day`/`month`/`year`). An invalid unit string fails to parse — but `slowapi` **fails open by default** (`swallow_errors=True`), so the bad limit was silently never enforced rather than crashing loudly. All 61 test requests returned `200` with no error anywhere. **Fix:** corrected to `"60/minute"`; also set `swallow_errors=False` during testing so a bad limit string raises immediately instead of silently no-opping — reverted to the default (`True`) once confirmed working, since a rate-limiter config typo shouldn't take down the whole API for real customers.
+
+**Colab/ngrok-specific gotcha:** behind a reverse proxy, every request arrives from the proxy's IP unless the app is told to trust forwarded headers — otherwise every client shares one rate-limit bucket. **Fix:** start uvicorn with `--proxy-headers --forwarded-allow-ips="*"`. Noted as a real, narrower fix needed for production: trusting `*` is fine only because the current proxy (ngrok) is the sole path in; a real deployment must scope this to the actual proxy's IP, not every source.
+
+**2. GPU concurrency limiting — `asyncio.Semaphore`.**
+
+Confirmed via `nvidia-smi` back in Phase 12 that this hardware serves one generation at a time efficiently — this was flagged as an unaddressed gap in Phase 11 and again in Phase 12, closed here.
+
+- New `config.get_max_concurrent_generations()`, defaulting to `1` — matches the real hardware ceiling, becomes a real config knob only once serving moves to a host that can genuinely parallelize.
+- New `rate_limit.generation_semaphore = asyncio.Semaphore(get_max_concurrent_generations())`.
+- **Deliberately checks `.locked()` and rejects immediately with `503` + `Retry-After: 5`, rather than letting excess requests queue on `async with`.** A queued request could silently wait past a client's own timeout with no feedback — same "fail fast, tell the caller honestly" philosophy as the `422`/`503` split from Phase 13, applied to GPU load instead of DB/generation failure.
+
+**Bugs hit while wiring this in, all found via manual two-request concurrency testing (not caught by any existing test):**
+
+1. **`status_code==503` (comparison, not assignment)** in the semaphore-busy branch — an unnoticed typo that threw an unhandled `NameError` the instant the busy branch was reached, surfacing as a bare, header-less `500` in ~0.04s instead of the intended `503`. Caught only by actually triggering two concurrent requests and reading the real status code, not by inspection.
+2. **A stale running process masked the fix twice in a row** — pushing the corrected code and re-cloning on Colab didn't matter because the *already-running* `uvicorn` process still had the old, broken module loaded in memory. Confirmed via `grep` on the file on disk (fix was present) versus the actual runtime behavior (fix wasn't). **Fix:** killed the stale PID (`lsof -i:8000`, `kill -9 <pid>`) and restarted fresh. **Lesson, worth generalizing:** a code fix that's confirmed on disk but still reproduces at runtime means the running process predates the fix — check for a stale process before re-diagnosing the "same" bug from scratch.
+3. Applied `Popen`'s `stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True` to actually surface uvicorn's real tracebacks during debugging, rather than debugging blind from client-side status codes and timing alone — worth keeping as standard practice for any future background-server debugging session.
+
+**Confirmed working, final state:** two near-simultaneous `/generate` calls at the default concurrency limit of 1 — one completes normally (~19-24s, `200`), the other returns almost instantly (~0.03-0.09s) with `503` and `Retry-After: 5`. Which of the two wins the semaphore is a genuine scheduling race between threads, not a bug — the shape of the result (one success, one fast-rejected) is what was being verified.
+
+**Result: all three planned API-layer items are now done** (`/health`, request logging, rate limiting). API layer phase closed out.
+
+**Carried forward:**
+- Rate-limit storage is in-memory — resets on restart, and doesn't work across multiple server instances. The production answer is Redis; not needed yet at one Colab instance, but a real gap once there's more than one process serving traffic.
+- IP-based keying is a known stopgap — revisit `client_key()` once authentication exists so limits and (eventually) tiers key off the API key/tenant, not the IP.
+- No automated test yet for either the `429` or the GPU-busy `503` path — both were verified manually (Colab + real HTTP calls + threading), the same gap class as `test_inference.py`'s monkeypatched stubs not exercising real argument-passing (Phase 12). Worth a `TestClient`-based test with `generate_sql_final` mocked, so this doesn't require manually spinning up Colab and firing concurrent requests every time this code is touched.
+No automated test yet... Closed — test_app.py covers both paths (429 on /schema, 503 on GPU-busy /generate, plus the 200/422/503(db-unavailable) generate outcomes), 5/5 passing.
+- Production `--forwarded-allow-ips` should be scoped to the real proxy's IP, not `*`, once deployed for real.
+
+**Next roadmap item:** Authentication.
