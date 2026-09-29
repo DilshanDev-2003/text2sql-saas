@@ -34,3 +34,6 @@ def get_wandb_api_key(env_var: str = "WANDB_API_KEY") -> str | None:
 
 def get_rate_limit(env_var: str, default: str) -> str:
   return os.environ.get(env_var, default)
+
+def get_max_concurrent_generations(env_var: str = "MAX_CONCURRENT_GENERATIONS", default: int = 1) -> int:
+  return int(os.environ.get(env_var, default))
