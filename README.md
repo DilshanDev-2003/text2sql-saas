@@ -4,11 +4,12 @@ A text-to-SQL system: given a natural language question and a database schema, g
 
 ## Status
 
-Actively in development. Core generation pipeline (fine-tuned model + schema validation + majority-vote consistency checking) is built and tested. Live database connectivity and model serving as a persistent API are both built and confirmed working end-to-end against a real database. The API layer is complete: a live-schema endpoint, a real health check, structured request logging, and rate limiting (per-IP request limits plus a GPU concurrency guard) are all built and confirmed working. Broader production concerns (authentication, multi-tenant security, RAG-based schema retrieval, multi-dialect SQL beyond Postgres) are deliberately not yet built — see [Roadmap](#roadmap).
+Actively in development. Core generation pipeline (fine-tuned model + schema validation + majority-vote consistency checking) is built and tested, and the API layer (schema endpoint, health check, logging, rate limiting) is complete. **Product shape clarified:** this is an end-user-facing website — a person logs in, connects their own database, types a natural-language question, and sees results in the site's interface — not an API-first product for other companies to integrate. API-key authentication was built first and remains available for secondary programmatic access, but **user accounts with JWT/OAuth login are now the primary authentication**, and several phases below have been added or reshaped to reflect that. See [Roadmap](#roadmap).
 
 ## How it works
 
 1. A question comes in via the `/generate` API endpoint (`app.py`). If it uses a known business term (domain-specific jargon not present in the schema), its real SQL meaning is injected into the prompt first (`semantic_layer.py`). The schema itself comes from a live database connection, introspected once at startup (`db_connection.py`) — or, for evaluation, a static Spider lookup. The same live schema is also available directly via `GET /schema`.
+*(Note: the model/live-DB connection is currently loaded once at server startup for a single fixed database — this was built before the product shape was finalized as "each user connects their own database," and will need to become per-user rather than a single global connection; see Roadmap.)*
 2. The model — loaded once at startup, not per-request (`model_loader.py`) — generates candidate SQL.
 3. Each candidate is checked against the real schema (`schema_validation.py`) — catches hallucinated column/table names before ever touching a database.
 4. Surviving candidates are executed (`db_runner.py`) via a pluggable executor — either safely against a SQLite eval file with a timeout, or against a live database with both read-only enforcement and a timeout (`query_guard.py`).
@@ -21,6 +22,8 @@ Actively in development. Core generation pipeline (fine-tuned model + schema val
 |---|---|
 | `app.py` | The FastAPI service. Loads the model and connects to the live database once at startup; exposes `POST /generate`, `GET /schema`, and `GET /health`; enforces rate limiting and GPU concurrency limits. |
 | `rate_limit.py` | Per-IP request rate limiting (`slowapi`) and a GPU concurrency guard (`asyncio.Semaphore`) — both keyed to be swappable once authentication exists. |
+| `auth.py` | Generates, hashes, and verifies API keys; `require_api_key` is the FastAPI dependency protecting `/generate` and `/schema`. |
+| `create_key.py` | Manual script to onboard a tenant and issue their API key (shown once, never stored in raw form). |
 | `model_loader.py` | Loads the fine-tuned model (base model + LoRA adapter, 4-bit quantized) once as a singleton, for reuse across every request. |
 | `request_logger.py` | Writes one structured JSON line per `/generate` call (question, duration, status, outcome) to a durable log file — not the query's result data, deliberately. |
 | `schema_validation.py` | Checks if generated SQL only references real tables/columns. Works against a static (Spider) schema or a live database schema. No model needed either way. |
@@ -100,8 +103,14 @@ Being built incrementally, driven by actual need rather than upfront completenes
 - [x] Live database connectivity (SQLAlchemy-based, any engine)
 - [x] Model serving as a persistent API service (not notebook-based)
 - [x] API layer / interface for the product — `/schema`, error handling (422/503), a real `/health` check, request logging, and rate limiting (per-IP + GPU concurrency) are all done
-- [ ] Authentication — **up next**
-- [ ] Multi-tenant data isolation
-- [ ] Semantic-layer term authoring (usable without writing Python)
-- [ ] Usage metering / billing
+- [x] API-key authentication (hashed, tenant-scoped) — built and working; now a **secondary** option for programmatic access, not the primary gate (see User Accounts below)
+- [ ] **User accounts + login (JWT/OAuth) — up next, now the primary authentication.** Every website action (connecting a database, running a query, viewing results) belongs to a logged-in person, not a service calling an API — this needs its own login flow (signup, password or SSO, session/refresh tokens), distinct from the API-key pattern already built.
+- [ ] **Per-user database connections.** Each user connects *their own* database rather than the server having one fixed connection at startup — credentials stored encrypted per-user (not a shared `.env` value), with a test-connection step before saving, and the current single global `_engine`/`_live_schema` in `app.py` reworked into something keyed per logged-in user.
+- [ ] Multi-tenant data isolation — effectively merged with the item above in this shape, since "tenant" now simply means "the logged-in user and their own connected database."
+- [ ] Usage metering / billing — now naturally tracked per user, not per API key
 - [ ] Deployment infrastructure (hosting, uptime, scaling)
+
+### Product Surface (new — required for this shape, wasn't needed for the original API-first plan)
+- [ ] **Frontend web interface** — the actual website: login screen, a "connect your database" flow, a query input, and a results view. This is now core product, not an optional dashboard on top of an API.
+- [ ] Query history — each user's past questions and results, viewable later
+- [ ] Basic account/usage page — queries run, any quota, connected databases

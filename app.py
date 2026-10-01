@@ -6,6 +6,7 @@ from sqlalchemy import text
 import time
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+import os
 
 from model_loader import load_model, get_model_and_tokenizer
 from config import get_connection_string
@@ -28,9 +29,11 @@ async def lifespan(app: FastAPI):
   
   load_model()
 
-  _engine = get_engine(get_connection_string())
-  _live_schema = get_live_schema(_engine)
-  _dialect = get_sqlglot_dialect(_engine)
+  if os.environ.get("SKIP_MODEL_LOAD") != "1":
+    load_model()
+    _engine = get_engine(get_connection_string())
+    _live_schema = get_live_schema(_engine)
+    _dialect = get_sqlglot_dialect(_engine)
 
   yield
 
@@ -143,3 +146,6 @@ async def schema(request: Request, response: Response, tenant_id: int = Depends(
     Returns the live database's schema(e.g., tables, column names with types, primary keys, and foreign keys.)
   """  
   return _live_schema
+
+from auth_routes import router as auth_router
+app.include_router(auth_router)

@@ -40,3 +40,6 @@ def get_max_concurrent_generations(env_var: str = "MAX_CONCURRENT_GENERATIONS", 
 
 def get_control_plane_connection_string() -> str:
   return get_connection_string("CONTROL_PLANE_DATABASE_URL")
+
+def get_jwt_secret() -> str:
+  return get_connection_string("JWT_SECRET")

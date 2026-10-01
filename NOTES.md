@@ -603,4 +603,116 @@ Confirmed via `nvidia-smi` back in Phase 12 that this hardware serves one genera
 No automated test yet... Closed — test_app.py covers both paths (429 on /schema, 503 on GPU-busy /generate, plus the 200/422/503(db-unavailable) generate outcomes), 5/5 passing.
 - Production `--forwarded-allow-ips` should be scoped to the real proxy's IP, not `*`, once deployed for real.
 
-**Next roadmap item:** Authentication.
+## 21. Phase 17 — Authentication (in progress)
+
+Up next per the roadmap, now that the API layer is fully closed out (Phase 16). Scoped as **API keys**, not JWT/OAuth login — the product is an API, not something end users sign into, and an API key doubles as the tenant identity that rate limiting, multi-tenant isolation, and billing will all need regardless, so building it first lets those reuse it rather than each inventing their own identity concept later.
+
+**Design decisions made, with reasoning:**
+
+- **API keys over JWT/OAuth or an auth-as-a-service provider (Auth0/Clerk).** JWT/OAuth is the right tool for a product with user logins (signup, password reset, sessions) — not yet needed here. Auth-as-a-service is reasonable later but adds a new dependency and cost before there are real users to justify it. API keys are the smallest thing that actually protects the API today, and the standard pattern for developer-facing APIs (Stripe, OpenAI, Anthropic all work this way).
+- **Keys stored as SHA-256 hashes, never the raw key.** A database leak then exposes nothing usable. Looked up via direct indexed equality (`WHERE key_hash = ?`), not a loop of comparisons.
+- **Not bcrypt/scrypt/argon2.** Those defend against brute-forcing low-entropy, human-chosen passwords. A 256-bit random key has no meaningful brute-force surface already, so a slow hash only adds latency to every authenticated request for no real security gain. SHA-256 is the standard choice here — same approach Stripe and GitHub use.
+- **`hmac.compare_digest` for any direct key-vs-hash comparison** (used in `verify_api_key`, exercised in tests) — plain `==` short-circuits on the first mismatched byte, leaking a timing side-channel; constant-time comparison closes that.
+- **`t2s_live_` prefix on generated keys**, plain text, not part of the secret. Lets a human or an automated secret-scanner (e.g. GitHub push-protection) recognize a leaked key by shape, and leaves room for a future `t2s_test_` sandbox tier without changing the generation function's structure.
+- **Postgres (a separate Neon database), not DynamoDB, for the `api_keys`/`tenants` tables** — discussed and decided deliberately, not by default. The data is inherently relational (a tenant has many keys; usage/billing will need to roll up per tenant), which is exactly what a relational database is built for and what DynamoDB would require denormalizing around. DynamoDB remains genuinely worth learning, but on a workload that actually fits its strengths — **earmarked for the rate-limit store later** (a per-key counter, read/written at high frequency, no relations needed), replacing the in-memory storage flagged as a production gap back in Phase 16.
+- **Separate control-plane database, apart from customer data** — a credential leak or bug in one database can't expose the other.
+
+**Schema (`tenants`, `api_keys`):**
+- `tenants`: `id`, `name`, `created_at`.
+- `api_keys`: `id`, `tenant_id` (FK), `key_hash` (`UNIQUE`, indexed), `created_at`, `revoked_at` (nullable timestamp, not a boolean) — a timestamp records *when* a key was revoked, useful for later auditing ("was this key valid at the time of that request?"), which a plain `is_active` flag can't answer.
+- No raw-key column anywhere, by design.
+
+**`auth.py` — three small, pure functions, built and manually verified first (no DB needed):**
+- `generate_api_key()` — `secrets.token_urlsafe(32)` (256 bits), not `random` (predictable) or `uuid4` (not documented as cryptographically secure) — `secrets` is Python's purpose-built CSPRNG.
+- `hash_api_key()` — SHA-256, reused both at key creation and at lookup time.
+- `verify_api_key()` — constant-time comparison; used directly in tests and anywhere a raw key is compared against one already-known hash.
+
+**`create_key.py`** — a manual onboarding script (`python create_key.py "Tenant Name"`): creates the tenant row, generates a key, stores only its hash, and prints the raw key exactly once — the only moment it exists outside the client's hands. Tested successfully; tenant and hashed key confirmed inserted via direct `SELECT` against the control-plane DB.
+
+**`require_api_key` — the FastAPI dependency wired into `/generate` and `/schema`:**
+- Reads the key from the `X-API-Key` header (via `Header(...)` on an `x_api_key` parameter) — the conventional header for static API keys, as opposed to `Authorization: Bearer`, which is the convention for OAuth/JWT tokens. Matching the header convention to the auth type actually in use, rather than defaulting to `Authorization`, was a deliberate choice.
+- `lookup_tenant()` hashes the incoming key and does a single indexed `WHERE key_hash = :key_hash AND revoked_at IS NULL` query — the revocation check lives in the query itself, not as a separate post-lookup condition in Python, so there's no code path where a revoked key could slip through by a downstream check being forgotten.
+- Returns `tenant_id` (not just a boolean) via FastAPI's `Depends` injection — making the tenant's identity available to every protected route now, which rate limiting and billing will need next.
+- Missing or invalid key → `401`. `/health` deliberately stays unauthenticated, since uptime monitors shouldn't need a key.
+- Control-plane engine is a module-level singleton, matching the existing `_engine` pattern in `app.py` — created once, reused across requests.
+
+**Not yet done / open as of this wrap-up:**
+- Manual `curl` verification of the three cases (no key → `401`; wrong key → `401`; real key → `200`) — written but not yet run.
+- No automated test yet for `require_api_key` — a real gap given `test_app.py` already exists and this is exactly the kind of security-critical path worth covering there, the same reasoning that drove writing tests for the rate-limit paths in Phase 16.
+- `client_key()` in `rate_limit.py` still keys on IP, not yet switched to the now-available `tenant_id` — this was the explicit reason `client_key` was isolated into its own function back in Phase 16, and auth landing is what unblocks it.
+- Key rotation/revocation workflow — the `revoked_at` column exists, but nothing yet sets it (no "revoke a key" script or endpoint).
+- `app.py`'s other routes (none currently besides `/generate`/`/schema`/`/health`) and any future endpoints will need the same `Depends(require_api_key)` treatment as a matter of course.
+
+**Next steps, in order:** run the `curl` verification; write `test_app.py` coverage for `require_api_key` (missing/invalid/revoked/valid key); then decide whether to switch `rate_limit.py`'s `client_key()` to tenant-based limiting before or after multi-tenant isolation, since that's the next roadmap item after auth closes out.
+
+## 22. Phase 18 — Product Shape Clarified: Pivot from API-First to End-User Website
+
+A direct conversation about "should auth be JWT/OAuth, since this is production SaaS?" surfaced that the actual planned product differs from what the earlier phases (13 onward) were built assuming.
+
+**What was assumed through Phase 17:** an API-first product — other startups integrate `/generate` into their own backends. API keys are the industry-standard fit for that shape (Stripe/OpenAI/Twilio-style), which is why Phase 17 built hashed API-key auth first.
+
+**What the product actually is:** an end-user-facing website. A person logs in, connects *their own* database, types a natural-language question, and sees results directly in the site's interface. There is no other company's backend calling this API — the caller is always a human in a browser.
+
+**Why this changes the architecture, not just the auth mechanism:**
+
+1. **JWT/OAuth moves from "a later learning phase" to "required, primary infrastructure."** Every action on the site belongs to a logged-in person, so session/login handling isn't optional or secondary — it's the main authentication path. API-key auth, built in Phase 17, isn't wasted: it remains valid for an optional secondary "call our API directly" path a user could enable later, but it's no longer the primary gate.
+
+2. **"Tenant" was modeled wrong.** Phase 17 modeled a tenant as a company with an API key. In this shape, the tenant *is* the logged-in user. Multi-tenant isolation and user accounts collapse into one piece of work rather than two sequential phases.
+
+3. **The single global DB connection in `app.py` doesn't fit anymore.** `_engine`/`_live_schema` were built once at server startup for one fixed customer database (correct for the API-first assumption — one company, one DB, configured once via `.env`). In the real shape, each logged-in user connects their *own*, different database. This needs to become per-user state, not a startup-time singleton — a real rework, not a small patch.
+
+4. **User-supplied database credentials are a bigger security surface than anything built so far.** `config.py`'s `.env`-based pattern is fine for *your own* credentials (DB, HF token, wandb key) — it was never meant to hold *other people's* database passwords. Storing those needs real encrypted secrets handling (e.g. envelope encryption via a KMS), flagged now as its own roadmap item rather than folded quietly into "per-user connections."
+
+**Decision: re-sequence the roadmap rather than bolt the new pieces onto the old plan.** User accounts + login (JWT/OAuth) is now the next phase, ahead of finishing tenant-based rate limiting (which depended on a tenant model that no longer matches the product) and ahead of the originally separate multi-tenant-isolation phase (now merged with user accounts, since they're the same concept in this shape). A new "Product Surface" roadmap section was added for the actual website itself (login screen, connect-a-database flow, query input, results view) — work that wasn't previously tracked at all because the API-first plan didn't need a frontend as core product.
+
+**Nothing already built is thrown away:** `auth.py`'s hashing/constant-time-comparison functions, the `api_keys`/`tenants` schema, and the rate-limiting/concurrency work all remain valid pieces — they're repositioned (API keys: secondary/optional; tenant concept: reused for the new per-user model) rather than discarded.
+
+## 23. Phase 19 — User Accounts + JWT Login (in progress)
+
+Follows directly from Phase 18's pivot: the product is an end-user-facing website, not an API-first product, so login is now core, primary infrastructure rather than a later learning extension. Deliberately scoped small — password login only first; OAuth, email verification, and multi-DB connections are explicitly later steps of this same phase, not dropped.
+
+**Schema decision: `users` table built minimal and strict, not pre-built for later features.**
+
+```sql
+CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+`password_hash` is `NOT NULL` and there's no `email_verified_at` column yet, even though both will be needed once OAuth/email-verification land. Deliberate: every user right now *does* have a password, so `NOT NULL` lets the database itself reject a bug that tried to insert a passwordless row, rather than silently allowing one. Loosening a constraint later (`ALTER COLUMN ... DROP NOT NULL`, adding a new column) is a one-line, no-downtime migration; tightening one after real data exists requires a backfill first. Starting strict and loosening later is the cheaper direction, so there's no benefit to front-loading structure for features that don't exist yet.
+
+**Password hashing: `passlib` + `bcrypt`, not the SHA-256 used for API keys.** A real, important distinction, not just "use a different function because it's a different kind of secret": an API key is 256 bits of true randomness with no brute-force-able structure, so a fast hash (SHA-256) is correct and a slow one would only add latency for no security benefit. A human password is the opposite — low-entropy and guessable — so a deliberately *slow*, tunable hash (`bcrypt`) is what makes a stolen `users` table expensive to crack rather than instant. `CryptContext(schemes=["bcrypt"], deprecated="auto")` was chosen over calling `bcrypt` directly because `deprecated="auto"` gives a built-in path to upgrade to a stronger scheme later (e.g. `argon2`) without a manual rehash-everything migration — `passlib` can verify old hashes with the old scheme while hashing new ones with the new scheme.
+
+**Bug hit: `ValueError: password cannot be longer than 72 bytes` on a short, ordinary password.** Not a real length issue — a known compatibility bug between `passlib` and `bcrypt` 4.x, which changed an internal version-detection interface that `passlib`'s backend misreads, miscounting password length on essentially any input. **Fix:** pinned `bcrypt==4.0.1` in both `requirements.txt` and `requirements-colab.txt`. Worth remembering as its own class of lesson (alongside the Phase 8 `bitsandbytes` issue): a library-pairing version bug can look exactly like a user-input error, and the fix is a version pin, not a code change.
+
+**JWT: `PyJWT`, `HS256`, 60-minute expiry, no refresh token yet.**
+- `create_access_token(user_id)` — uses the standard `sub` (subject) and `exp` claims rather than custom field names, so the token is interoperable with any standard JWT tool, not just this codebase's own code.
+- `decode_access_token(token)` — returns `None` on any failure (expired, tampered, malformed) via a broad `except jwt.PyJWTError`, rather than letting exceptions leak to the caller; the caller (the next step's `require_user` dependency) only needs a yes/no.
+- `exp` enforcement is handled automatically by `PyJWT` during `decode()` — no manual timestamp comparison needed.
+- 60 minutes is a starting default, not derived from any real requirement yet; a refresh-token mechanism is a legitimate, explicitly deferred later addition, not an oversight.
+- New required secret: `JWT_SECRET`, same optional-env-var-via-`config.py` pattern as `DATABASE_URL`/`HF_TOKEN`, generated once via `secrets.token_urlsafe(32)` and added to `.env`/`.env.example`.
+
+**New file `auth_routes.py` — `/signup` and `/login` endpoints, mounted on `app.py` via `include_router`.**
+- `EmailStr` (pydantic) validates email format at the request-parsing boundary, before any database touch.
+- `/login` returns the identical `401` message regardless of whether the email doesn't exist or the password is wrong — a deliberate choice to avoid letting an attacker enumerate which emails have real accounts, a well-known information-leak pattern in login endpoints.
+- `/signup` checks for an existing email and returns `409` on collision, otherwise inserts and returns a token immediately (sign up and be logged in, in one step) — no email verification gate yet, by design, since that's a later step.
+- Both reuse `get_control_plane_engine()` from `auth.py` unchanged — `users` lives in the same control-plane Neon database as `tenants`/`api_keys`, no new connection logic needed.
+
+**Local testing friction, not yet resolved as of this wrap-up — two separate issues surfaced:**
+
+1. **Windows PowerShell's `curl` is an alias for `Invoke-WebRequest`**, with an entirely different argument syntax (`-H`/`-d` don't work as they do in real `curl`/bash/Colab) — not a bug, just a platform mismatch worth remembering for any future local-testing instructions on this machine. `Invoke-RestMethod` with a PowerShell hashtable piped through `ConvertTo-Json` is the more idiomatic equivalent, and parses the JSON response back into a usable object automatically.
+
+2. **The real blocker: `app.py`'s `lifespan` unconditionally calls `load_model()` and connects to the live customer DB on every startup — including for testing endpoints (`/signup`, `/login`) that touch neither.** Since Phase 12 confirmed the local Windows machine's GPU (RTX 2050, 4GB) can't actually serve the model, attempting to run `uvicorn app:app` locally for pure auth testing likely hangs or fails before the server ever starts listening, which is why `Invoke-RestMethod` couldn't connect at all — nothing was there to connect to.
+
+**Proposed fix, not yet confirmed:** gate the model/DB loading behind a `SKIP_MODEL_LOAD` env var in `lifespan`, so auth-only endpoints can be tested locally and quickly without Colab or a GPU at all — a real, useful separation now that auth and generation are genuinely independent concerns of the system.
+
+**Not yet done / open as of this wrap-up:**
+- Confirm whether a uvicorn process was actually running locally (`netstat -ano | findstr :8000`) — not yet checked.
+- Apply the `SKIP_MODEL_LOAD` gate and retest `/signup`/`/login` locally.
+- `require_user` — the FastAPI dependency that reads the JWT from a protected route and returns the logged-in user's `id` (mirrors `require_api_key`'s shape) — not yet written.
+- OAuth (Google/GitHub), email verification, and `db_connections` (multi-DB per user) — all explicitly deferred to later steps of this same phase, not forgotten.
+
+**Next step:** resolve local testing (apply the `SKIP_MODEL_LOAD` gate, confirm `/signup`/`/login` work end-to-end), then write `require_user` and protect a route with it.
