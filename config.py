@@ -37,3 +37,6 @@ def get_rate_limit(env_var: str, default: str) -> str:
 
 def get_max_concurrent_generations(env_var: str = "MAX_CONCURRENT_GENERATIONS", default: int = 1) -> int:
   return int(os.environ.get(env_var, default))
+
+def get_control_plane_connection_string() -> str:
+  return get_connection_string("CONTROL_PLANE_DATABASE_URL")

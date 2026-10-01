@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response, Depends
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -13,6 +13,7 @@ from inference import generate_sql_final, _live_executor
 from db_connection import get_engine, get_live_schema, get_sqlglot_dialect
 from request_logger import log_request
 from rate_limit import limiter, GENERATE_LIMIT, SCHEMA_LIMIT, generation_semaphore
+from auth import require_api_key
 
 _engine = None
 _live_schema = None
@@ -49,7 +50,7 @@ class GenerateResponse(BaseModel):
 
 @app.post("/generate", response_model=GenerateResponse)
 @limiter.limit(GENERATE_LIMIT)
-async def generate(request: Request, response: Response, req: GenerateRequest):
+async def generate(request: Request, response: Response, req: GenerateRequest, tenant_id: int = Depends(require_api_key)):
   model, tokenizer = get_model_and_tokenizer()
   start = time.time()
 
@@ -137,7 +138,7 @@ def _db_reachable():
 # Schema Endpoint
 @app.get("/schema")
 @limiter.limit(SCHEMA_LIMIT)
-async def schema(request: Request, response: Response):
+async def schema(request: Request, response: Response, tenant_id: int = Depends(require_api_key)):
   """
     Returns the live database's schema(e.g., tables, column names with types, primary keys, and foreign keys.)
   """  
