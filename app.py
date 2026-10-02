@@ -14,7 +14,7 @@ from inference import generate_sql_final, _live_executor
 from db_connection import get_engine, get_live_schema, get_sqlglot_dialect
 from request_logger import log_request
 from rate_limit import limiter, GENERATE_LIMIT, SCHEMA_LIMIT, generation_semaphore
-from auth import require_api_key
+from auth import require_api_key, require_user
 
 _engine = None
 _live_schema = None
@@ -149,3 +149,7 @@ async def schema(request: Request, response: Response, tenant_id: int = Depends(
 
 from auth_routes import router as auth_router
 app.include_router(auth_router)
+
+@app.get("/me")
+async def me(user_id: int = Depends(require_user)):
+  return {"user_id": user_id}
