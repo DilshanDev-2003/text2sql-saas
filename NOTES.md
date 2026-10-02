@@ -715,4 +715,22 @@ CREATE TABLE users (
 - `require_user` — the FastAPI dependency that reads the JWT from a protected route and returns the logged-in user's `id` (mirrors `require_api_key`'s shape) — not yet written.
 - OAuth (Google/GitHub), email verification, and `db_connections` (multi-DB per user) — all explicitly deferred to later steps of this same phase, not forgotten.
 
-**Next step:** resolve local testing (apply the `SKIP_MODEL_LOAD` gate, confirm `/signup`/`/login` work end-to-end), then write `require_user` and protect a route with it.
+**Update: `require_user` built, debugged, and confirmed working — core of Phase 19 complete.**
+
+**Bug hit: `require_user` had no `return` statement.** The validation logic (header check, Bearer-prefix check, `decode_access_token` call, `None` check) was all correct, but the function fell off the end instead of returning `user_id` — Python implicitly returns `None` in that case. This passed every earlier check silently: no exception, no error, just a `200` response with `user_id: None` baked into it, the exact shape of bug that's easy to miss because nothing *looks* broken until the actual value is inspected. **Fix:** added the missing `return user_id`. Also normalized the function to `async def`, matching `require_api_key`'s convention from Phase 17 — not required today (no I/O inside), but consistent with where this is headed (a future `db_connections` lookup inside a similar dependency will need `async`).
+
+**`/me` endpoint added to `app.py`** — the first real authenticated route, `GET /me` returning `{"user_id": ...}` via `Depends(require_user)`. Deliberately unrated-limited, same reasoning as `/health`: cheap, not GPU-related.
+
+**Testing note, not a bug:** a missing `Authorization` header returns FastAPI's own `422` (`Field required`), not the custom `401` written in `require_user` — because `Header(...)` with no default makes the header a required *request* parameter, validated by FastAPI before the route function body (or its dependencies) ever execute. A malformed-but-present header (garbage token) does reach the custom logic and correctly returns `401`. Worth remembering which layer produces which error when protecting future routes the same way.
+
+**Confirmed end-to-end: signup → login → valid-token `/me` (returns real `user_id`) → missing-header `/me` (`422`) → garbage-token `/me` (`401`, "Invalid or Expired Token").** All four cases behave as designed.
+
+**Result: Phase 19's core slice — password-based signup, login, and JWT-protected routes — is done and working**, tested via Colab with the `SKIP_MODEL_LOAD` env-var gate (local Windows testing remains blocked on the local GPU not being able to load the model at all; Colab is now the standing way to test auth-only changes quickly, without touching the model or live customer DB).
+
+**Carried forward, explicitly deferred steps of this same phase, not forgotten:**
+- OAuth (Google/GitHub) login — a second path into the same `users` table.
+- Email verification — `email_verified_at` column and the flow around it.
+- `db_connections` (multi-DB per user) — the actual point of all this, still ahead.
+- No automated test yet for `/signup`/`/login`/`/me`/`require_user` — same gap class as `require_api_key` in Phase 17; worth a `test_auth.py` alongside `test_app.py` before this phase is called fully closed.
+
+**Next step:** write `test_auth.py` covering signup/login/`/me` (duplicate email, wrong password, missing/invalid/valid token), then move to OAuth or `db_connections`.
