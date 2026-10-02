@@ -83,7 +83,7 @@ def decode_access_token(token: str) -> int | None:
 # The FastAPI dependency that protects a route with this token, mirroring
 from fastapi import Header, HTTPException
 
-def require_user(authorization: str = Header(...)) -> int:
+async def require_user(authorization: str = Header(...)) -> int:
   if not authorization.startswith("Bearer "):
     raise HTTPException(status_code=401, detail="Missing or Invalid Authorization error")
 
@@ -92,3 +92,5 @@ def require_user(authorization: str = Header(...)) -> int:
 
   if user_id is None:
     raise HTTPException(status_code=401, detail="Invalid or Expired Token")
+
+  return user_id
