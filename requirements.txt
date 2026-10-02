@@ -2,3 +2,9 @@ sqlglot>=30.0.0
 pytest>=8.0.0
 python-dotenv
 slowapi
+
+# Authentication
+passlib[bcrypt]
+bcrypt==4.0.1
+pyjwt
+pydantic[email]
