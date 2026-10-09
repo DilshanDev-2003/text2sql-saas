@@ -771,4 +771,36 @@ scripts/
 
 **Next roadmap item, picking back up from Phase 19:** `test_auth.py` (signup/login/`/me` coverage, closing the gap flagged at the end of Phase 19), then continuing the deferred auth steps — OAuth, email verification, `db_connections` (multi-DB per user) — now on a measurably cleaner codebase to build them into.
 
-**Next step:** write `test_auth.py` covering signup/login/`/me` (duplicate email, wrong password, missing/invalid/valid token), then move to OAuth or `db_connections`.
+## 25. Phase 19 (continued) — Google OAuth Login
+
+**What it is and why:** OAuth 2.0 delegates identity to a provider; OpenID Connect (OIDC) on top adds a verified identity (`sub`, email). Benefits: no password handling for these users, a verified email, less signup friction, and an industry-standard skill. OAuth does not replace the JWT system; it is a second way to prove identity, after which the app issues its own JWT and `require_user` is unchanged.
+
+**Alternatives considered:** password-only (user owns all risk), magic links (needs email infrastructure first), passkeys (needs a frontend), SAML/enterprise SSO (a later sales-driven feature), auth-as-a-service like Auth0/Clerk (fast, but teaches nothing), and hand-rolling the flow (token validation is easy to get subtly wrong). Chose **Authorization Code flow with Authlib, Google first**: Authlib handles state, code exchange, and ID-token signature/expiry/audience verification, while the flow stays visible in route code. Google first because the target customers are company data users; GitHub can hide emails and is deferred.
+
+**Built:**
+- `app/auth/oauth.py`: Google client, registered **lazily** so a missing credential doesn't crash every test run and Colab startup that never touches OAuth.
+- `app/auth/users.py`: `find_or_create_oauth_user`.
+- `app/auth/oauth_routes.py`: `GET /auth/google/login` and `/auth/google/callback`.
+- Config: `get_required_env` (a properly named helper; the older getters still borrow `get_connection_string`'s read-or-raise), Google client ID/secret, redirect URI **read from config, not the request**, and `SESSION_SECRET` kept **separate from `JWT_SECRET`** (one key per purpose).
+- `SessionMiddleware` exists only to hold the OAuth `state` value during the redirect, preventing login CSRF. The app is still JWT-based, not session-based.
+
+**Schema:** `users.password_hash` made nullable; new `oauth_identities` (`UNIQUE (provider, provider_user_id)`). Identity is keyed on Google's stable `sub`, never on email, which can change. A separate table lets one person link several providers.
+
+**Security decision, with a correction:** an earlier note implied email-based merging was safe because Google verifies emails. That ignored the local side: password signup does not verify email, so auto-linking enables **pre-hijacking** (an attacker pre-registers `victim@gmail.com` with their own password, the victim later signs in with Google, and the attacker keeps the account). So if the email already exists without a linked identity, the callback refuses with `409`. Safe linking becomes possible once email verification exists and the local account is verified. Unverified Google emails are also rejected.
+
+**Bug prevented:** with a nullable `password_hash`, `/login` would pass `None` into passlib and `500` on OAuth-only accounts. It now returns the same generic `401`.
+
+**Testing:** `conftest.py` sets throwaway `JWT_SECRET`/`SESSION_SECRET` so the suite runs without a `.env`. `test_oauth.py` (10 tests) mocks Google entirely, covering the redirect, success, OAuth error, unverified email, missing userinfo, the `409` refusal, existing-identity reuse, the refusal-to-merge lookup, new-user creation, and the OAuth-only `/login` `401`. Suite: **66/66**. Manual browser flow verified: first sign-in created a user and identity, a repeat sign-in returned the same user.
+
+**Gotchas:** use `localhost` consistently (the session cookie is per host, so mixing it with `127.0.0.1` gives `mismatching_state`); the redirect URI must match Google's registered one exactly; in Testing mode only listed test users can sign in.
+
+**Carried forward:**
+- The callback returns JSON; the real website needs a frontend handoff (Product Surface phase).
+- `/signup` and `/login` have **no rate limiting**, so they are open to credential stuffing; this matters before any public deployment.
+- The `require_api_key` tests and tenant-based rate limiting from Phase 17 are paused.
+- GitHub login is not built.
+- Going public needs Google's app verification, plus the deployed domain's redirect URI registered.
+- Colab needs `uvicorn app.main:app` and the new env vars after pulling.
+- README is stale (describes the flat layout, no auth).
+
+**Next:** email verification (which also unlocks safe account linking), then `db_connections`.
