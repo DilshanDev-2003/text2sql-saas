@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import text
-from auth import hash_password, verify_password, create_access_token, get_control_plane_engine
+from app.auth.security import hash_password, verify_password, create_access_token
+from app.auth.dependencies import get_control_plane_engine
 
 router = APIRouter()
 
@@ -48,7 +49,7 @@ def login(req: LoginRequest):
       {"email": req.email},
     ).first()
 
-  if row is None or not verify_password(req.password, row.password_hash):
+  if row is None or row.password_hash is None or not verify_password(req.password, row.password_hash):
     raise HTTPException(status_code=401, detail="Invalid email or password.")
 
   token = create_access_token(row.id)

@@ -4,7 +4,7 @@ import tempfile
 
 import pytest
 
-import semantic_layer
+import app.services.semantic_layer as semantic_layer
 
 
 @pytest.fixture

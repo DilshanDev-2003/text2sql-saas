@@ -4,10 +4,10 @@ from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 import wandb
 
-from config import get_wandb_api_key
-from model_loader import load_model
-from inference import generate_sql_final
-from db_runner import compare_execution
+from app.core.config import get_wandb_api_key
+from app.services.model_loader import load_model
+from app.services.inference import generate_sql_final
+from app.db.runner import compare_execution
 
 # Data Loading
 
@@ -87,9 +87,12 @@ def run_full_eval(model, tokenizer, n=5, save_every=15, rolling_window=50):
 
     print(f"Total examples: {len(dev_set)} | Already done: {len(already_done)}")
 
+    """
     running_correct = already_done and sum(
         1 for i in already_done  # cheap re-derivation isn't tracked here; rolling window resets fresh each session, which is fine — it's a recent-trend signal, not a cumulative one
     ) or 0
+    """
+
     recent_results = []
     total_correct_so_far = 0
     total_scored_so_far = 0

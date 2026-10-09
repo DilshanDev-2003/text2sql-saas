@@ -3,7 +3,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 import asyncio
 
-from config import get_rate_limit, get_max_concurrent_generations
+from app.core.config import get_rate_limit, get_max_concurrent_generations
 
 def client_key(request: Request) -> str:
   return get_remote_address(request)

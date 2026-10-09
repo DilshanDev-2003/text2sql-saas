@@ -1,7 +1,7 @@
 import sqlite3
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
-from query_guard import guard_readonly
+from app.db.query_guard import guard_readonly
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 def execute_queries(db_path, query, timeout_seconds=5):

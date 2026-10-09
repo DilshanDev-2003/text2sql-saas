@@ -1,5 +1,5 @@
 import pytest
-from query_guard import guard_readonly
+from app.db.query_guard import guard_readonly
 
 def test_plain_select_passes():
   guard_readonly("SELECT * FROM singer")  # should not raise

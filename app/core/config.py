@@ -43,3 +43,25 @@ def get_control_plane_connection_string() -> str:
 
 def get_jwt_secret() -> str:
   return get_connection_string("JWT_SECRET")
+
+#OAuth
+def get_required_env(env_var: str) -> str:
+  value = os.environ.get(env_var)
+  if not value:
+    raise EnvironmentError(f"Missing required environment variable: {env_var}.")
+  return value
+
+
+def get_google_client_id() -> str:
+  return get_required_env("GOOGLE_CLIENT_ID")
+
+
+def get_google_client_secret() -> str:
+  return get_required_env("GOOGLE_CLIENT_SECRET")
+
+
+def get_session_secret() -> str:
+  return get_required_env("SESSION_SECRET")
+
+def get_google_redirect_uri() -> str:
+  return os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback")

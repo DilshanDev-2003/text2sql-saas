@@ -1,8 +1,8 @@
 import json
 import random
 
-from eval_full import CHECKPOINT_PATH
-from analyze_failures import load_results, classify_failure
+from scripts.eval.eval_full import CHECKPOINT_PATH
+from scripts.eval.analyze_failures import load_results, classify_failure
 
 
 def sample_uncategorized_failures(n=30, seed=42):

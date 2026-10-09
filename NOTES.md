@@ -733,4 +733,42 @@ CREATE TABLE users (
 - `db_connections` (multi-DB per user) — the actual point of all this, still ahead.
 - No automated test yet for `/signup`/`/login`/`/me`/`require_user` — same gap class as `require_api_key` in Phase 17; worth a `test_auth.py` alongside `test_app.py` before this phase is called fully closed.
 
+## 24. Phase 20 — LLD Refactor: Flat Files to Layered Architecture
+
+Everything had lived as flat `.py` files in the project root since Phase 1. Restructured into a proper layered `app/` package, done in four confirmed steps rather than all at once, specifically to catch any breakage early with the existing 48-test suite as the safety net at every step.
+
+**Final structure:**
+app/
+├── core/ — config, rate_limit, request_logger (cross-cutting, no business logic)
+├── auth/ — security.py (pure crypto/JWT), dependencies.py (DB lookups + FastAPI deps), routes.py
+├── db/ — connection.py, runner.py, query_guard.py (database access only, no business rules)
+├── services/ — model_loader, model_utils, schema_validation, semantic_layer, inference (the actual product logic)
+├── api/
+│ ├── routes/ — generate.py, schema.py, health.py
+│ └── schemas.py
+└── main.py — composition only: lifespan, app.include_router calls
+scripts/
+├── create_key.py
+└── eval/ — eval_full, rerun_failed, rescore_all, analyze_failures, sample_for_review
+
+
+**Key design decisions:**
+- **`app/db/` vs `app/services/` is the real architectural boundary** — `db/` only knows how to talk to a database; `services/` holds the actual generation/validation/voting logic. This formalizes the executor-abstraction pattern from Phase 10 as an explicit folder boundary rather than an implicit convention.
+- **`auth.py` was split, not just relocated** — into `security.py` (pure functions: hashing, JWT, no DB/FastAPI dependency), `dependencies.py` (DB-backed lookups + the `require_api_key`/`require_user` FastAPI dependencies), and `routes.py`. Splitting by what each piece actually depends on, not just by "it's all auth," makes each piece independently testable and reusable.
+- **`scripts/eval/` kept deliberately outside `app/`** — offline analysis tooling has no business being importable by the running API; the folder boundary makes that explicit.
+- **Switched `_engine`/`_live_schema`/`_dialect` from module-level globals in `app.py` to `app.state`**, FastAPI's idiomatic shared-state mechanism. This wasn't just a migration necessity (avoiding a circular import between `main.py` and the new `app/api/routes/*.py` files) — it's also the correct foundation for Phase 18's per-user-database pivot, where this will need to become per-request/per-user lookup rather than one global anyway.
+- **`schema_validation.py`/`semantic_layer.py` deliberately kept function-based, not converted to classes** — they're stateless, and a class would only be justified by a real need for injected/swappable dependencies, which doesn't exist yet. Not forcing OOP where it isn't earning its keep.
+
+**Real bugs found and fixed purely as a side effect of this refactor, not sought out deliberately:**
+
+1. **`test_app.py` had been silently missing `require_api_key`'s required header since Phase 17.** The test file was written in Phase 16, before `/generate`/`/schema` gained their `Depends(require_api_key)` requirement, and was never updated — every test in it was returning FastAPI's own `422` (missing header) rather than exercising the actual route logic at all, which went unnoticed until running the full suite together during this migration surfaced it. **Fix:** `app.dependency_overrides[require_api_key] = lambda: 1` in the test fixture — the standard FastAPI pattern for bypassing a dependency the test isn't meant to exercise.
+2. **`app.py`'s `lifespan` called `load_model()` twice** — once unconditionally, once again inside the `SKIP_MODEL_LOAD` guard added in Phase 19. On any real run the model loaded twice, wasting GPU time/memory. Caught while splitting `main.py` apart and reading the function closely for the first time in a while. Fixed by removing the unconditional call.
+3. **`eval_full.py`'s `run_full_eval` computed an unused `running_correct` variable** via a convoluted `sum(1 for i in already_done)` — dead code that did real (if harmless) work for nothing, noticed only while reviewing the file's full content during the scripts move. Flagged for removal.
+
+**Process note worth keeping:** the first two steps (`core`/`db`, then `services`) were walked through together, file by file, with every import fix given explicitly. By the third and fourth steps, the pattern was established well enough that imports were self-fixed correctly without needing that level of hand-holding — confirmed by 48/48 passing at every single step, no regressions introduced anywhere along the way.
+
+**Result: the codebase is now genuinely layered, every file has one clear responsibility, and all 48 tests passed at the end of every one of the four steps.** No functional behavior changed — this was a pure structural refactor, with three real, independent bugs caught as a bonus of actually reading every file closely during the move.
+
+**Next roadmap item, picking back up from Phase 19:** `test_auth.py` (signup/login/`/me` coverage, closing the gap flagged at the end of Phase 19), then continuing the deferred auth steps — OAuth, email verification, `db_connections` (multi-DB per user) — now on a measurably cleaner codebase to build them into.
+
 **Next step:** write `test_auth.py` covering signup/login/`/me` (duplicate email, wrong password, missing/invalid/valid token), then move to OAuth or `db_connections`.

@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from db_runner import execute_queries, compare_execution
+from app.db.runner import execute_queries, compare_execution
 
 
 @pytest.fixture

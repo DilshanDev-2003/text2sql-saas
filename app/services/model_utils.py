@@ -1,4 +1,4 @@
-from semantic_layer import inject_semantic_terms
+from app.services.semantic_layer import inject_semantic_terms
 
 def format_schema(schema_row):
     return (

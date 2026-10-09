@@ -1,6 +1,6 @@
 import json
-from eval_full import CHECKPOINT_PATH, get_dev_db_path
-from db_runner import compare_execution
+from scripts.eval.eval_full import CHECKPOINT_PATH, get_dev_db_path
+from app.db.runner import compare_execution
 
 def rescore_all():
     """

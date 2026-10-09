@@ -8,3 +8,8 @@ passlib[bcrypt]
 bcrypt==4.0.1
 pyjwt
 pydantic[email]
+
+# OAuth
+authlib
+itsdangerous
+httpx

@@ -1,5 +1,5 @@
 import pytest
-from schema_validation import validate_sql, extract_column_names
+from app.services.schema_validation import validate_sql, extract_column_names
 
 # --- extract_column_names ---
 

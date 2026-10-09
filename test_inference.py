@@ -1,5 +1,5 @@
 import pytest
-import inference
+import app.services.inference as inference
 
 
 # --- voting_candidates ---

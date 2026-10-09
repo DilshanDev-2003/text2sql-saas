@@ -3,9 +3,9 @@ from collections import Counter
 import sqlglot
 from sqlglot.expressions import Table, Column
 
-from model_utils import generate_sql
-from schema_validation import validate_sql
-from db_runner import execute_queries, execute_live
+from app.services.model_utils import generate_sql
+from app.services.schema_validation import validate_sql
+from app.db.runner import execute_queries, execute_live
 
 def _eval_executor(db_path):
   """

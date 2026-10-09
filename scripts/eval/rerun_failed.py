@@ -1,7 +1,7 @@
 import json
-from eval_full import CHECKPOINT_PATH, load_schema_lookup, load_dev_set, get_dev_db_path
-from inference import generate_sql_final
-from db_runner import compare_execution
+from scripts.eval.eval_full import CHECKPOINT_PATH, load_schema_lookup, load_dev_set, get_dev_db_path
+from app.services.inference import generate_sql_final
+from app.db.runner import compare_execution
 
 def find_failed_indices():
     """

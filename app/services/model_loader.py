@@ -2,7 +2,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
 
-from config import get_hf_token
+from app.core.config import get_hf_token
 
 BASE_MODEL_REPO = "meta-llama/Llama-3.2-3B-Instruct"
 ADAPTER_REPO = "DilshanDev/llama-text2sql-v2-saas"

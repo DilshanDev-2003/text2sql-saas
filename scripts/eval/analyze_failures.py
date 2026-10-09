@@ -2,8 +2,8 @@ import json
 import sqlglot
 from sqlglot.expressions import Join, Table, Column, EQ
 
-from eval_full import CHECKPOINT_PATH, get_dev_db_path
-from db_runner import execute_queries
+from scripts.eval.eval_full import CHECKPOINT_PATH, get_dev_db_path
+from app.db.runner import execute_queries
 
 
 def load_results():
