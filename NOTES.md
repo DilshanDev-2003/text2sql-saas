@@ -803,4 +803,24 @@ scripts/
 - Colab needs `uvicorn app.main:app` and the new env vars after pulling.
 - README is stale (describes the flat layout, no auth).
 
-**Next:** email verification (which also unlocks safe account linking), then `db_connections`.
+## 26. Post-Refactor Colab Verification (and a configuration-drift postmortem)
+
+Goal: confirm the layered `app/` package runs on Colab's GPU from a fresh clone. **Result: confirmed.** `/health` reported all components `ok`, `/schema` listed only the customer's `singer` table, and `/generate` returned the correct SQL and result (29.0). The code needed no changes; every failure along the way was environment configuration, in this order:
+
+1. **`ModuleNotFoundError: psycopg`.** The traceback went through psycopg 3, not psycopg2, even for a plain `postgresql://` URL. A likely cause (inferred from the SQLAlchemy 2.1 error-link version, not verified) is that Colab installs a newer SQLAlchemy than the laptop, with a different default driver. Fix: `psycopg[binary]` must be in both requirements files, and SQLAlchemy should be pinned in both so the environments stop drifting (same class as the `bcrypt==4.0.1` pin).
+2. **`DATABASE_URL` pointed at `localhost`.** Correct in the local `.env`, meaningless on Colab, where nothing listens on 5432. Found by printing only the parsed scheme, host, and database name (`make_url`), never the password.
+3. **Missing `HF_TOKEN`.** A Colab Secret isn't automatically in `os.environ`; the env-loading cell must run in the same kernel before launching the server. The gated Llama repo then returned `401`.
+4. **The generation engine pointed at a database containing the auth tables.** The model happily wrote SQL against `users`/`oauth_identities`. This is a security finding, not just a test annoyance: `guard_readonly` blocks writes but allows any `SELECT`, so overlap between generation and auth databases would let an API-key holder read password hashes. In the real product the generation engine uses the customer's own credentials against the customer's own database, so no overlap exists. Remaining protections to build: a **read-only database role** for the generation connection, and **per-connection table allowlists**. (A "refuse to start if a `users` table exists" rule was rejected, since real customer databases legitimately have one.)
+5. **Two Neon projects and two copies of the control-plane schema** had accumulated, with different shapes (one had `email_verified_at`, `email_verifications`, `db_connections`; the other didn't). Classic schema drift. Resolved by a separate `customer_test` database for generation data and one authoritative control plane.
+6. **`load_dotenv()` does not override variables already set in the shell.** A stale `$env:CONTROL_PLANE_DATABASE_URL` silently beats `.env`. Worth remembering whenever local and Colab behavior disagree.
+
+**Process improvements adopted:**
+- Colab values come from **Colab Secrets** (not pasted cells), loaded by an env cell that reports missing keys; the same pattern production uses with a secrets manager.
+- Server started with `uvicorn app.main:app` (the old `app:app` no longer exists).
+- Diagnose configuration by printing parsed, non-secret parts of a URL, never the URL itself.
+
+**Next improvements, not yet built:**
+- **Fail-fast startup validation** in `lifespan`: check all required env vars and that the connected database has tables, raising one clear error that names what's missing. Every failure above surfaced as a deep traceback far from its cause.
+- Pin `psycopg[binary]` and SQLAlchemy in both requirements files.
+- Commit the control-plane schema as a versioned SQL file, then adopt **Alembic** for migrations, so rebuilding a database is one command and drift can't accumulate.
+- README refresh (still describes the flat layout and has no auth).

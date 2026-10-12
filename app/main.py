@@ -17,16 +17,30 @@ from app.api.routes.health import router as health_router
 from starlette.middleware.sessions import SessionMiddleware
 from app.core.config import get_session_secret
 from app.auth.oauth_routes import router as oauth_router
+from app.core.startup_checks import (
+  StartupError, check_environment, check_schema, check_control_plane, raise_if_problems,
+)
+from app.auth.dependencies import require_user, get_control_plane_engine
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-  """Loads the model and connects to the live database once at startup."""
+  """Validates configuration, connects to the live database, then loads the model."""
   if os.environ.get("SKIP_MODEL_LOAD") != "1":
+    raise_if_problems(check_environment())
+
+    try:
+      app.state.engine = get_engine(get_connection_string())
+      app.state.live_schema = get_live_schema(app.state.engine)
+      app.state.dialect = get_sqlglot_dialect(app.state.engine)
+    except Exception as e:
+      raise StartupError(f"Cannot reach the generation database: {str(e).splitlines()[0]}") from e
+
+    raise_if_problems(
+      check_schema(app.state.live_schema) + check_control_plane(get_control_plane_engine())
+    )
+
     load_model()
-    app.state.engine = get_engine(get_connection_string())
-    app.state.live_schema = get_live_schema(app.state.engine)
-    app.state.dialect = get_sqlglot_dialect(app.state.engine)
 
   yield
 

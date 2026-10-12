@@ -4,6 +4,7 @@ from pathlib import Path
 # Adds the project root directory to Python's path automatically
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
+
 from sqlalchemy import create_engine, text
 from app.auth.security import generate_api_key, hash_api_key
 from app.core.config import get_control_plane_connection_string

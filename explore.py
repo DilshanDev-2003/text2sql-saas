@@ -206,3 +206,17 @@ sql = generate_sql_final(
   executor=_live_executor(engine), live_schema=live_schema, dialect=dialect, n=5,
 )
 """
+
+import os
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
+
+load_dotenv()
+url = os.environ["CONTROL_PLANE_DATABASE_URL"]
+print(make_url(url).host, make_url(url).database)
+
+with create_engine(url).connect() as c:
+  print([r[0] for r in c.execute(text(
+    "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY 1"
+  ))])
