@@ -13,3 +13,7 @@ pydantic[email]
 authlib
 itsdangerous
 httpx
+
+sqlalchemy==2.0.52
+psycopg[binary]
+psycopg2-binary

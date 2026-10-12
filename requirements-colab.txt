@@ -13,10 +13,11 @@ uvicorn
 pyngrok
 
 # Product code dependencies (mirrors requirements.txt)
-sqlalchemy
 sqlglot
 python-dotenv
+sqlalchemy==2.1.1
 psycopg[binary]
+psycopg2-binary
 
 wandb
 
