@@ -14,6 +14,6 @@ authlib
 itsdangerous
 httpx
 
-sqlalchemy==2.0.52
+sqlalchemy==2.1.1
 psycopg[binary]
 psycopg2-binary

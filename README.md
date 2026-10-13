@@ -1,65 +1,88 @@
 # Text2SQL SaaS
 
-A text-to-SQL system: given a natural language question and a database schema, generates correct SQL. Built around a fine-tuned Llama 3.2 3B model, with a schema-validation and self-consistency layer to catch and correct common failure modes before returning an answer. Can run against either a static evaluation database (SQLite/Spider) or a live, real database (SQLAlchemy, any supported engine), and is servable as a persistent API, not just as scripts.
+A text-to-SQL system: given a natural-language question and a database schema, it generates correct SQL. It is built around a fine-tuned Llama 3.2 3B model, with a schema-validation and self-consistency layer that catches and corrects common failure modes before an answer is returned. It runs against either a static evaluation database (SQLite/Spider) or a live database (SQLAlchemy), and is served as a persistent FastAPI service with API-key and JWT/OAuth authentication.
 
 ## Status
 
-Actively in development. Core generation pipeline (fine-tuned model + schema validation + majority-vote consistency checking) is built and tested, and the API layer (schema endpoint, health check, logging, rate limiting) is complete. **Product shape clarified:** this is an end-user-facing website — a person logs in, connects their own database, types a natural-language question, and sees results in the site's interface — not an API-first product for other companies to integrate. API-key authentication was built first and remains available for secondary programmatic access, but **user accounts with JWT/OAuth login are now the primary authentication**, and several phases below have been added or reshaped to reflect that. See [Roadmap](#roadmap).
+Actively in development. The generation pipeline (fine-tuned model, schema validation, majority-vote consistency checking) is built and tested, with **67.12% execution accuracy** on the full Spider dev set. Live database connectivity, the API layer (schema endpoint, health check, request logging, rate limiting, GPU concurrency guard), API-key authentication, password signup/login with JWT, Google OAuth login, and fail-fast startup validation are all built and covered by a 76-test suite.
+
+**Product direction:** an end-user website where a person logs in, connects their own database, asks questions in natural language, and sees results. The backend foundations (accounts, login, the layered architecture) are in place; per-user database connections and the frontend are next. See [Roadmap](#roadmap).
 
 ## How it works
 
-1. A question comes in via the `/generate` API endpoint (`app.py`). If it uses a known business term (domain-specific jargon not present in the schema), its real SQL meaning is injected into the prompt first (`semantic_layer.py`). The schema itself comes from a live database connection, introspected once at startup (`db_connection.py`) — or, for evaluation, a static Spider lookup. The same live schema is also available directly via `GET /schema`.
-*(Note: the model/live-DB connection is currently loaded once at server startup for a single fixed database — this was built before the product shape was finalized as "each user connects their own database," and will need to become per-user rather than a single global connection; see Roadmap.)*
-2. The model — loaded once at startup, not per-request (`model_loader.py`) — generates candidate SQL.
-3. Each candidate is checked against the real schema (`schema_validation.py`) — catches hallucinated column/table names before ever touching a database.
-4. Surviving candidates are executed (`db_runner.py`) via a pluggable executor — either safely against a SQLite eval file with a timeout, or against a live database with both read-only enforcement and a timeout (`query_guard.py`).
-5. If multiple candidates were generated, the most self-consistent answer wins — the SQL whose *result* the most candidates agree on, not just the first one that happened to run (`inference.py`). The winning SQL and its result are both returned as JSON; every `/generate` call is also logged (question, duration, outcome — not result data) for operational visibility.
-6. `GET /health` reports whether the model and live database connection are both genuinely usable, not just whether the process is running. Every route except `/health` is rate-limited per client, and `/generate` additionally enforces a GPU concurrency limit — an excess request is rejected immediately with `503` rather than queued.
+1. A request reaches `POST /generate` (`app/api/routes/generate.py`). It passes the rate limiter and API-key check, then a GPU concurrency guard that rejects excess requests immediately with `503` instead of queuing them.
+2. If the question uses a known business term, its SQL meaning is injected into the prompt (`semantic_layer.py`). The schema comes from the live database, introspected once at startup.
+3. The model, loaded once at startup, generates candidate SQL.
+4. Each candidate is checked against the real schema (`schema_validation.py`), which catches hallucinated tables and columns before any query runs.
+5. Surviving candidates are executed through a pluggable executor, either against a SQLite eval file or a live database with read-only enforcement and a timeout (`query_guard.py`).
+6. The SQL whose *result* the most candidates agree on wins (self-consistency voting), and its SQL and result are returned as JSON. Failures return `422` (no valid query) or `503` (database unreachable or GPU busy).
+
+**Authentication:** programmatic callers use an `X-API-Key` header (keys are stored only as SHA-256 hashes). People use `POST /signup` and `POST /login` (bcrypt-hashed passwords, JWT access tokens) or Google sign-in via `GET /auth/google/login`. `GET /me` returns the authenticated user.
+
+**Startup:** before loading the model, the server validates its configuration (required environment variables, database reachability, control-plane tables, and that the generation database is not the control plane) and fails with one readable message listing every problem.
 
 ## Project structure
 
-| File | Responsibility |
-|---|---|
-| `app.py` | The FastAPI service. Loads the model and connects to the live database once at startup; exposes `POST /generate`, `GET /schema`, and `GET /health`; enforces rate limiting and GPU concurrency limits. |
-| `rate_limit.py` | Per-IP request rate limiting (`slowapi`) and a GPU concurrency guard (`asyncio.Semaphore`) — both keyed to be swappable once authentication exists. |
-| `auth.py` | Generates, hashes, and verifies API keys; `require_api_key` is the FastAPI dependency protecting `/generate` and `/schema`. |
-| `create_key.py` | Manual script to onboard a tenant and issue their API key (shown once, never stored in raw form). |
-| `model_loader.py` | Loads the fine-tuned model (base model + LoRA adapter, 4-bit quantized) once as a singleton, for reuse across every request. |
-| `request_logger.py` | Writes one structured JSON line per `/generate` call (question, duration, status, outcome) to a durable log file — not the query's result data, deliberately. |
-| `schema_validation.py` | Checks if generated SQL only references real tables/columns. Works against a static (Spider) schema or a live database schema. No model needed either way. |
-| `db_runner.py` | Executes SQL safely: against a SQLite file for eval (with a timeout), or against a live SQLAlchemy connection (read-only enforced, timed out, results normalized to plain Python types for JSON serialization). |
-| `db_connection.py` | Creates a SQLAlchemy engine for any supported database and introspects its live schema (columns, types, primary keys, foreign keys). |
-| `query_guard.py` | Rejects any SQL that isn't a plain, safe `SELECT` — the read-only enforcement used before executing generated SQL live. |
-| `config.py` | Reads database credentials, the Hugging Face token, and (optionally) a Weights & Biases API key from environment variables (`.env` locally) instead of hardcoding them. |
-| `model_utils.py` | Talks to the fine-tuned model — prompt formatting (for either schema source) and generation only. |
-| `semantic_layer.py` | Maps business terminology to real SQL logic, so questions using jargon the schema doesn't cover still resolve correctly. |
-| `inference.py` | Combines the above into full generation strategies (first-valid-wins retry, and generate-many-then-vote), against either a static eval database or a live one. Result rows are compared order-independently (both across rows and within each row), so logically identical answers in a different column order aren't miscounted as different. |
-| `eval_full.py`, `rerun_failed.py`, `rescore_all.py`, `analyze_failures.py`, `sample_for_review.py` | Full-dev-set evaluation tooling: a checkpointed, resumable eval loop; targeted re-scoring of specific examples; failure categorization; and a reproducible manual-review sampler. See `NOTES.md` Phase 14 for the full story, including a real eval-methodology bug this tooling found and fixed. |
+```
+app/
+├── core/       config, rate_limit, request_logger, startup_checks
+├── auth/       security (hashing, JWT), dependencies (API key / user), routes, oauth, oauth_routes, users
+├── db/         connection (engine + schema introspection), runner (execution), query_guard (read-only)
+├── services/   model_loader, model_utils, schema_validation, semantic_layer, inference
+├── api/        routes/{generate,schema,health}.py, schemas.py
+└── main.py     app composition: lifespan, middleware, routers
+scripts/        create_key.py, eval/ (offline evaluation tooling)
+migrations/     001_control_plane.sql
+conftest.py     test environment defaults
+test_*.py       test suite (run from the project root)
+```
 
-Model training and full evaluation runs live in a separate Colab notebook (GPU required). For now, the API itself also runs on Colab (see [Setup](#setup)) — local hardware isn't sufficient to serve the model; the code is written to be environment-agnostic, so moving to a dedicated GPU host later needs no code changes, only a different place to run it.
+| Layer | Responsibility |
+|---|---|
+| `app/core` | Cross-cutting concerns with no business logic: configuration from environment variables, rate limiting, request logging, startup validation. |
+| `app/auth` | Everything about identity. `security.py` holds pure functions with no database or web framework; `dependencies.py` holds the database-backed lookups and FastAPI dependencies. |
+| `app/db` | Database access only: engines, schema introspection, safe execution, read-only enforcement. |
+| `app/services` | Product logic: model loading, prompting, schema validation, semantic layer, generation strategies. |
+| `app/api` | Thin FastAPI route handlers. |
+
+`scripts/eval/` holds the full-dev-set evaluation tooling (checkpointed eval loop, re-scoring, failure analysis, manual-review sampler) and is deliberately outside `app/`, since the running API never imports it. Model training lives in a separate Colab notebook (GPU required). See `NOTES.md` for the full development history.
 
 ## Setup
 
-Local development (schema validation, execution, tests — no GPU needed):
+Local development (tests, auth, schema work; no GPU needed):
 
 ```bash
 pip install -r requirements.txt
-```
-
-To connect to a live database, copy `.env.example` to `.env` and fill in a real connection string and (if the model repo is gated/private) a Hugging Face token:
-
-```bash
 cp .env.example .env
-# then edit .env and set DATABASE_URL and, if needed, HF_TOKEN
 ```
 
-Running the API — Colab, GPU required (see `NOTES.md` Phase 12 for the full setup story, including known gotchas):
+Fill in `.env`. The main variables:
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | The database the model queries (a customer database, **not** the control plane) |
+| `CONTROL_PLANE_DATABASE_URL` | Your own database for users, API keys, and OAuth identities |
+| `JWT_SECRET`, `SESSION_SECRET` | Separate signing secrets (generate each with `python -c "import secrets; print(secrets.token_urlsafe(32))"`) |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google OAuth client (optional `GOOGLE_REDIRECT_URI`) |
+| `HF_TOKEN` | Hugging Face token (the base model is gated) |
+| `WANDB_API_KEY` | Optional, for eval logging |
+| `RATE_LIMIT_GENERATE`, `RATE_LIMIT_SCHEMA`, `MAX_CONCURRENT_GENERATIONS` | Optional tuning |
+
+Create the control-plane schema by running `migrations/001_control_plane.sql` against the control-plane database, then issue an API key:
 
 ```bash
-pip install -r requirements-colab.txt
+python scripts/create_key.py "Tenant Name"
 ```
 
-Then, inside a Colab notebook: set `DATABASE_URL`/`HF_TOKEN` as environment variables, launch `uvicorn app:app --host 0.0.0.0 --port 8000`, and expose it via `ngrok` for external testing. A local, non-Colab GPU host with enough VRAM (roughly 4GB+ free, more with headroom) can run the same command directly, no ngrok needed.
+The key is printed once and only its hash is stored.
+
+To test authentication without a GPU, skip model loading:
+
+```bash
+SKIP_MODEL_LOAD=1 uvicorn app.main:app --port 8000
+```
+
+Serving the model needs a GPU with enough VRAM and currently runs on Colab (local hardware is insufficient). In a Colab notebook: clone the repo, `pip install -r requirements-colab.txt`, load the variables above from Colab Secrets into `os.environ`, then run `uvicorn app.main:app --host 0.0.0.0 --port 8000` (expose it with `ngrok` for external testing). The code is environment-agnostic, so moving to a dedicated GPU host needs no code changes.
 
 ## Running tests
 
@@ -67,11 +90,11 @@ Then, inside a Colab notebook: set `DATABASE_URL`/`HF_TOKEN` as environment vari
 pytest -v
 ```
 
-Covers `schema_validation.py`, `db_runner.py`, `query_guard.py`, and `inference.py`'s logic (with the model generation step mocked out, so no GPU is needed to run the test suite) — including the live-database code paths, exercised with mocked schemas and executors rather than a real connection.
+76 tests covering schema validation, query execution, the read-only guard, inference orchestration (with model generation mocked, so no GPU is needed), the semantic layer, all API routes including rate-limit and GPU-busy paths, authentication (signup, login, JWT, OAuth with Google mocked), and startup validation.
 
 ## Evaluation methodology
 
-Accuracy is measured by **execution accuracy**: the generated SQL and the gold SQL are both run against the real database, and their *results* are compared — not the raw SQL text, and not sensitive to which order the SELECT columns came back in. This catches cases where differently-written SQL produces the same correct answer, and catches cases where similar-looking SQL produces a wrong one.
+Accuracy is measured by **execution accuracy**: the generated SQL and the gold SQL are both run against the real database, and their *results* are compared, not the raw SQL text, and not sensitive to which order the SELECT columns came back in. This catches cases where differently written SQL produces the same correct answer, and cases where similar-looking SQL produces a wrong one.
 
 Evaluated against the full [Spider](https://yale-lily.github.io/spider) text-to-SQL benchmark dev set (1034 examples).
 
@@ -81,36 +104,44 @@ Evaluated against the full [Spider](https://yale-lily.github.io/spider) text-to-
 | 50-example sample (+ validation + voting) | 72.00% |
 | **Full 1034-example dev set (checkpoint-270)** | **67.12%** |
 
-The full-dataset number is the trustworthy baseline — small samples turned out to be optimistic. See `NOTES.md` Phase 14 for the full breakdown, including a manual review of failure patterns (missing joins, negation errors, schema confusion, case sensitivity, and others) and a real bug in the evaluation comparison logic itself that was found and fixed along the way.
-
-See `NOTES.md` for the full development history, every bug hit along the way, and how each was diagnosed and fixed.
+The full-dataset number is the trustworthy baseline; small samples turned out to be optimistic. See `NOTES.md` (Phase 14) for the failure-pattern analysis and a real bug in the evaluation comparison logic that was found and fixed along the way.
 
 ## Roadmap
 
-Being built incrementally, driven by actual need rather than upfront completeness:
+Built incrementally, driven by need rather than upfront completeness.
 
 ### Generation Quality
 - [x] Fine-tuned base model
 - [x] Execution-accuracy evaluation harness
 - [x] Schema validation (pre-execution hallucination guard)
 - [x] Self-consistency (majority-vote) generation
-- [x] Semantic layer (business terminology → SQL mapping)
-- [ ] Second contrastive-training round targeting patterns found in the full-eval manual review (missing joins, negation, schema confusion, stat-column misinterpretation, case sensitivity)
+- [x] Semantic layer (business terminology to SQL mapping)
+- [ ] Second contrastive-training round targeting the failure patterns found in the full-eval manual review (missing joins, negation, schema confusion, stat-column misinterpretation, case sensitivity)
 - [ ] RAG-based schema retrieval (for large schemas)
-- [ ] Multi-dialect SQL support beyond Postgres (Snowflake, BigQuery, MySQL)
+- [ ] Multi-dialect SQL support beyond Postgres
 
-### Deployment Readiness (required before launch — not deferred)
-- [x] Live database connectivity (SQLAlchemy-based, any engine)
-- [x] Model serving as a persistent API service (not notebook-based)
-- [x] API layer / interface for the product — `/schema`, error handling (422/503), a real `/health` check, request logging, and rate limiting (per-IP + GPU concurrency) are all done
-- [x] API-key authentication (hashed, tenant-scoped) — built and working; now a **secondary** option for programmatic access, not the primary gate (see User Accounts below)
-- [ ] **User accounts + login (JWT/OAuth) — up next, now the primary authentication.** Every website action (connecting a database, running a query, viewing results) belongs to a logged-in person, not a service calling an API — this needs its own login flow (signup, password or SSO, session/refresh tokens), distinct from the API-key pattern already built.
-- [ ] **Per-user database connections.** Each user connects *their own* database rather than the server having one fixed connection at startup — credentials stored encrypted per-user (not a shared `.env` value), with a test-connection step before saving, and the current single global `_engine`/`_live_schema` in `app.py` reworked into something keyed per logged-in user.
-- [ ] Multi-tenant data isolation — effectively merged with the item above in this shape, since "tenant" now simply means "the logged-in user and their own connected database."
-- [ ] Usage metering / billing — now naturally tracked per user, not per API key
+### Accounts and Security
+- [x] API-key authentication (hashed, constant-time verification)
+- [x] Password signup/login with JWT
+- [x] Google OAuth login
+- [x] Fail-fast startup validation
+- [ ] Email verification (also unlocks safe linking of OAuth and password accounts)
+- [ ] Rate limiting on `/signup` and `/login`
+- [ ] Per-user database connections: credentials stored encrypted, engines created per connection and cached
+- [ ] Encrypted secrets storage for user-supplied database credentials (KMS-style)
+- [ ] Read-only database role and per-connection table allowlists for the generation connection
+- [ ] GitHub login
+
+### Deployment Readiness
+- [x] Live database connectivity (SQLAlchemy, any engine)
+- [x] Model serving as a persistent API service
+- [x] API layer: schema endpoint, error handling (422/503), real health check, request logging, rate limiting, GPU concurrency guard
+- [ ] Shared rate-limit store (DynamoDB or Redis) for multi-instance deployment
+- [ ] Versioned database migrations with Alembic
+- [ ] Usage metering and billing
 - [ ] Deployment infrastructure (hosting, uptime, scaling)
 
-### Product Surface (new — required for this shape, wasn't needed for the original API-first plan)
-- [ ] **Frontend web interface** — the actual website: login screen, a "connect your database" flow, a query input, and a results view. This is now core product, not an optional dashboard on top of an API.
-- [ ] Query history — each user's past questions and results, viewable later
-- [ ] Basic account/usage page — queries run, any quota, connected databases
+### Product Surface
+- [ ] Frontend web interface: login, connect-a-database flow, query input, results view
+- [ ] Query history
+- [ ] Account and usage page
