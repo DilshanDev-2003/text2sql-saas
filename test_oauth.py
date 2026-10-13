@@ -3,10 +3,12 @@ from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, MagicMock, patch
 from authlib.integrations.starlette_client import OAuthError
 from starlette.responses import RedirectResponse
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from app.main import app
 from app.auth.security import decode_access_token
-from app.auth.users import find_or_create_oauth_user, EmailAlreadyRegistered
+from app.auth.users import find_or_create_oauth_user
 
 
 @pytest.fixture
@@ -94,15 +96,16 @@ def test_callback_missing_userinfo_returns_400(client):
 
   assert r.status_code == 400
 
+def test_verified_account_is_linked_not_duplicated():
+  verified = SimpleNamespace(id=3, email_verified_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+  engine, conn = _engine_with([_result(first=None), _result(first=verified), _result()])
 
-def test_callback_existing_password_account_returns_409(client):
-  oauth = fake_oauth(authorize_access_token=AsyncMock(return_value=google_token()))
+  with patch("app.auth.users.get_control_plane_engine", return_value=engine):
+    user_id = find_or_create_oauth_user("google", "google-123", "a@example.com")
 
-  with patch("app.auth.oauth_routes.get_oauth", return_value=oauth), \
-       patch("app.auth.oauth_routes.find_or_create_oauth_user", side_effect=EmailAlreadyRegistered()):
-    r = client.get("/auth/google/callback")
-
-  assert r.status_code == 409
+  assert user_id == 3
+  assert conn.execute.call_count == 3
+  assert "oauth_identities" in str(conn.execute.call_args_list[2].args[0])
 
 
 def test_existing_identity_returns_same_user():
@@ -114,25 +117,34 @@ def test_existing_identity_returns_same_user():
   assert user_id == 7
   assert conn.execute.call_count == 1
 
-
-def test_existing_email_without_identity_is_refused():
-  engine, conn = _engine_with([_result(first=None), _result(first=(3,))])
+def test_unverified_account_is_replaced_not_merged():
+  unverified = SimpleNamespace(id=3, email_verified_at=None)
+  engine, conn = _engine_with(
+    [_result(first=None), _result(first=unverified), _result(), _result(scalar=9), _result()]
+  )
 
   with patch("app.auth.users.get_control_plane_engine", return_value=engine):
-    with pytest.raises(EmailAlreadyRegistered):
-      find_or_create_oauth_user("google", "google-123", "a@example.com")
+    user_id = find_or_create_oauth_user("google", "google-123", "a@example.com")
 
-  assert conn.execute.call_count == 2
+  statements = [str(c.args[0]) for c in conn.execute.call_args_list]
+  assert user_id == 9
+  assert "DELETE FROM users" in statements[2]
+  assert "INSERT INTO users" in statements[3]
 
 
-def test_new_user_is_created_with_linked_identity():
-  engine, conn = _engine_with([_result(), _result(), _result(scalar=9), _result()])
+def test_new_user_is_created_verified_with_linked_identity():
+  engine, conn = _engine_with([_result(first=None), _result(first=None), _result(scalar=9), _result()])
 
   with patch("app.auth.users.get_control_plane_engine", return_value=engine):
     user_id = find_or_create_oauth_user("google", "google-123", "a@example.com")
 
   assert user_id == 9
   assert conn.execute.call_count == 4
+  assert "email_verified_at" in str(conn.execute.call_args_list[2].args[0])
+
+
+
+
 
 
 def test_login_oauth_only_user_returns_401_not_500(client):

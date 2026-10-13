@@ -824,3 +824,73 @@ Goal: confirm the layered `app/` package runs on Colab's GPU from a fresh clone.
 - Pin `psycopg[binary]` and SQLAlchemy in both requirements files.
 - Commit the control-plane schema as a versioned SQL file, then adopt **Alembic** for migrations, so rebuilding a database is one command and drift can't accumulate.
 - README refresh (still describes the flat layout and has no auth).
+
+## 27. Fail-Fast Startup Validation, Pins, and Migrations
+
+**Problem:** every failure in the Colab verification (Phase 26) surfaced as a deep traceback far from its cause, usually after a multi-minute model download.
+
+**`app/core/startup_checks.py`, wired into `lifespan` before `load_model()`:**
+- Order is cheap to slow: environment variables, generation database, schema sanity, control-plane tables, and only then the model.
+- Problems are **collected and raised once** (`StartupError`), so three mistakes show up as three lines instead of three restarts.
+- Only the **first line** of a database exception is kept: it contains host and port (the whole clue for `localhost:5432 refused`) and never the password.
+- The Hugging Face check uses `huggingface_hub.get_token()`, which covers both `HF_TOKEN` and a previous `login`.
+- The fingerprint check for "generation DB is actually the control plane" looks for `api_keys` and `oauth_identities` together, not a `users` table, because real customer databases legitimately have one.
+- The schema and fingerprint checks only apply while a single fixed generation database exists. When `db_connections` lands, each customer connection is validated at connect time instead; the environment and control-plane checks stay.
+- Correction: the empty-schema check was first written as `live_schema.get("tables")`. `get_live_schema` returns a dict keyed directly by table name, so the right test is `not live_schema`.
+
+`test_startup_checks.py` adds 10 tests (suite 76).
+
+**Housekeeping:**
+- Pinned `sqlalchemy==2.1.1` (the version Colab runs) and listed both `psycopg[binary]` and `psycopg2-binary`, so laptop and Colab stop choosing different drivers. Pin only packages that have already bitten (`bcrypt`, `sqlalchemy`).
+- `migrations/001_control_plane.sql` holds the control-plane schema in its final shape. The redundant `key_hash` index was dropped, since `UNIQUE` creates one. `migrations/` is what the product ships; the optional `scripts/sql/customer_test_seed.sql` (the `singer` table) is test data and deliberately lives elsewhere.
+- README rewritten for the layered architecture, auth, and the current roadmap.
+
+## 28. Email Verification and Safe Account Linking
+
+**Why:** without it, anyone can register someone else's address. It is also what makes OAuth account linking safe.
+
+**Design decisions:**
+
+| Decision | Choice | Why |
+|---|---|---|
+| Token | `secrets.token_urlsafe(32)`, stored only as SHA-256 | Same reasoning as API keys |
+| Lifetime | 24 hours, single use | Limits exposure; a link can't be replayed |
+| Endpoint | `POST /auth/verify-email` with the token in the body | Email scanners prefetch GET links and can burn a token before the user clicks |
+| Resend | Always `{"status": "ok"}`, only sends to unverified users, rate limited to 5/hour | No account enumeration; email endpoints are abuse vectors and bounces hurt sender reputation |
+| Enforcement | Login allowed; sensitive actions (connecting a database) will require verification | Blocking login only frustrates people who mistype their address |
+| Email sending | `EmailSender` Protocol, factory chosen by `EMAIL_BACKEND`, console backend now, **AWS SES later** | Routes depend on "something that sends email"; an unknown backend raises instead of silently falling back |
+
+**Schema (`migrations/002_email_verification.sql`):** `users.email_verified_at`, `email_verifications` (`ON DELETE CASCADE`), and a backfill that marks existing Google-only users verified.
+
+**Implementation:**
+- `app/auth/verification.py`: create/send/verify/resend. The email is sent **after** the transaction commits (otherwise the link could be clicked before the token row exists), and a send failure is logged but does not fail signup. Expiry is computed in Python and passed as a parameter, so it behaves the same on any driver.
+- Creating a token deletes the user's older ones (resend invalidates earlier links); verifying deletes them all (single use).
+- `conftest.py` forces `EMAIL_BACKEND=console` so no test can send real mail.
+
+**Bugs hit, both caught by running tests:**
+1. `get_email_sender()` returned the **class** instead of an instance (missing parentheses). Caught by `test_factory_defaults_to_console`; it would otherwise have failed at the first real signup.
+2. `logging.basicConfig(level=logging.info())` (function call) instead of `logging.INFO` (constant) broke the import of `app.main`, so four test files failed at collection. This is the third parenthesis bug of the project, so a static type checker (`pyright`/`mypy`) joins the roadmap.
+
+**OAuth linking rules (replacing the earlier "refuse to link"):**
+
+| Situation | Action |
+|---|---|
+| Google identity already linked | Log in as that user |
+| Email exists and is verified | Link Google to that account |
+| Email exists and is unverified | **Delete it and create a fresh verified account** |
+| No account | Create one, already verified |
+
+Why delete the unverified account instead of clearing its password and linking: JWTs are stateless, so the pre-hijacker's token from signup stays valid for up to 60 minutes and points at that user id. A fresh row gives the real owner a **new id**, and the attacker's token points at an id that no longer exists (`SERIAL` never reuses ids). This relies on unverified accounts owning nothing sensitive, which is why connecting a database will require verification. `SELECT ... FOR UPDATE` serializes the check against a concurrent verification click.
+
+**Tests:** `test_email.py` (6), `test_verification.py` (12), and `test_oauth.py` updated (three old-rule tests replaced by three new ones, including the pre-hijack protection). **Suite: 94/94.**
+
+**Verified manually against real Postgres:** signup, console email, token POST, `email_verified_at` set; scenario A (pre-hijack): the unverified account was replaced by a new, verified, passwordless one; scenario B (legitimate user): the same user id before and after Google login, password kept.
+
+**Known limitation:** stateless JWTs can't be revoked individually, and `/me` never checks the database. Long-term fix: short-lived access tokens with refresh tokens, or a token-version column.
+
+**Carried forward:**
+- SES backend (and a startup check refusing the console backend in a deployed environment, since it logs verification links).
+- Lowercase emails when writing and looking up (or `citext`), so `A@x.com` and `a@x.com` can't become two accounts.
+- Rate limiting on `/signup` and `/login` (`/signup` also sends email).
+- Static type checker; Alembic.
+- Then `db_connections`, gated behind verification.

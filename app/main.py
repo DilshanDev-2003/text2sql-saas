@@ -1,5 +1,6 @@
 import os
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI, Depends
 from slowapi import _rate_limit_exceeded_handler
@@ -22,6 +23,7 @@ from app.core.startup_checks import (
 )
 from app.auth.dependencies import require_user, get_control_plane_engine
 
+logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

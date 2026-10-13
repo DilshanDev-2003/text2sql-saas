@@ -4,7 +4,7 @@ from authlib.integrations.starlette_client import OAuthError
 from app.auth.oauth import get_oauth
 from app.auth.routes import TokenResponse
 from app.auth.security import create_access_token
-from app.auth.users import find_or_create_oauth_user, EmailAlreadyRegistered
+from app.auth.users import find_or_create_oauth_user
 from app.core.config import get_google_redirect_uri
 
 router = APIRouter()
@@ -26,12 +26,5 @@ async def google_callback(request: Request):
   if not userinfo or not userinfo.get("email_verified"):
     raise HTTPException(status_code=400, detail="Google account email is not verified.")
 
-  try:
-    user_id = find_or_create_oauth_user("google", userinfo["sub"], userinfo["email"])
-  except EmailAlreadyRegistered:
-    raise HTTPException(
-      status_code=409,
-      detail="An account with this email already exists. Sign in with your password.",
-    )
-
+  user_id = find_or_create_oauth_user("google", userinfo["sub"], userinfo["email"])
   return TokenResponse(access_token=create_access_token(user_id))

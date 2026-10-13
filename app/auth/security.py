@@ -47,3 +47,10 @@ def decode_access_token(token: str) -> int | None:
     return int(payload["sub"])
   except jwt.PyJWTError:
     return None
+
+# Email Verifications
+def generate_email_token() -> str:
+  return secrets.token_urlsafe(32)
+
+def hash_token(token: str) -> str:
+  return hashlib.sha256(token.encode()).hexdigest()  

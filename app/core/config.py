@@ -65,3 +65,10 @@ def get_session_secret() -> str:
 
 def get_google_redirect_uri() -> str:
   return os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback")
+
+# E-mail Verification
+def get_email_backend() -> str:
+  return os.environ.get("EMAIL_BACKEND", "console")
+
+def get_frontend_url() -> str:
+  return os.environ.get("FRONTEND_URL", "http://localhost:3000")

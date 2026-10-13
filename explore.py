@@ -205,7 +205,6 @@ sql = generate_sql_final(
   model, tokenizer, question="...", db_id=None, schema_lookup=None,
   executor=_live_executor(engine), live_schema=live_schema, dialect=dialect, n=5,
 )
-"""
 
 import os
 from dotenv import load_dotenv
@@ -220,3 +219,24 @@ with create_engine(url).connect() as c:
   print([r[0] for r in c.execute(text(
     "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY 1"
   ))])
+
+import requests
+
+r = requests.post("http://localhost:8000/signup", json={"email": "verify-test@example.com", "password": "testpass123"})
+print(r.status_code)
+
+r = requests.post("http://localhost:8000/auth/verify-email", json={"token": "e7lKgYUjFqoiYCaVTtG0M7cPRAGvPNypMuubEELYIZ4"})
+print(r.status_code, r.json())
+
+import requests
+
+r = requests.post("http://localhost:8000/signup", json={"email": "dilshanonline5@gmail.com", "password": "mypassword1"})
+print(r.status_code)
+
+r = requests.post("http://localhost:8000/auth/verify-email", json={"token": "gRiC3LvpMP4KKI9zCCB-XodK4P39j4QWOtX9HWXLZcw"})
+print(r.status_code, r.json())
+
+r = requests.post("http://localhost:8000/login", json={"email": "dilshanonline5@gmail.com", "password": "mypassword1"})
+print(r.status_code)
+
+"""

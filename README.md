@@ -4,7 +4,7 @@ A text-to-SQL system: given a natural-language question and a database schema, i
 
 ## Status
 
-Actively in development. The generation pipeline (fine-tuned model, schema validation, majority-vote consistency checking) is built and tested, with **67.12% execution accuracy** on the full Spider dev set. Live database connectivity, the API layer (schema endpoint, health check, request logging, rate limiting, GPU concurrency guard), API-key authentication, password signup/login with JWT, Google OAuth login, and fail-fast startup validation are all built and covered by a 76-test suite.
+Actively in development. The generation pipeline (fine-tuned model, schema validation, majority-vote consistency checking) is built and tested, with **67.12% execution accuracy** on the full Spider dev set. Live database connectivity, the API layer (schema endpoint, health check, request logging, rate limiting, GPU concurrency guard), API-key authentication, password signup/login with JWT, Google OAuth login, fail-fast startup validation, and email verification are all built and covered by a 94-test suite.
 
 **Product direction:** an end-user website where a person logs in, connects their own database, asks questions in natural language, and sees results. The backend foundations (accounts, login, the layered architecture) are in place; per-user database connections and the frontend are next. See [Roadmap](#roadmap).
 
@@ -67,8 +67,10 @@ Fill in `.env`. The main variables:
 | `HF_TOKEN` | Hugging Face token (the base model is gated) |
 | `WANDB_API_KEY` | Optional, for eval logging |
 | `RATE_LIMIT_GENERATE`, `RATE_LIMIT_SCHEMA`, `MAX_CONCURRENT_GENERATIONS` | Optional tuning |
+| `EMAIL_BACKEND` | Default "console" |
+| `FRONTEND_URL` | Used in verification links |
 
-Create the control-plane schema by running `migrations/001_control_plane.sql` against the control-plane database, then issue an API key:
+Create the control-plane schema by running `migrations/001_control_plane.sql` against the control-plane database, then issue an API key. Running migrations/002_email_verification.sql after 001:
 
 ```bash
 python scripts/create_key.py "Tenant Name"
@@ -90,7 +92,7 @@ Serving the model needs a GPU with enough VRAM and currently runs on Colab (loca
 pytest -v
 ```
 
-76 tests covering schema validation, query execution, the read-only guard, inference orchestration (with model generation mocked, so no GPU is needed), the semantic layer, all API routes including rate-limit and GPU-busy paths, authentication (signup, login, JWT, OAuth with Google mocked), and startup validation.
+94 tests covering schema validation, query execution, the read-only guard, inference orchestration (with model generation mocked, so no GPU is needed), the semantic layer, all API routes including rate-limit and GPU-busy paths, authentication (signup, login, JWT, OAuth with Google mocked), and startup validation.
 
 ## Evaluation methodology
 
@@ -125,7 +127,10 @@ Built incrementally, driven by need rather than upfront completeness.
 - [x] Password signup/login with JWT
 - [x] Google OAuth login
 - [x] Fail-fast startup validation
-- [ ] Email verification (also unlocks safe linking of OAuth and password accounts)
+- [x] Email verification (console email backend; SES backend still to do)
+- [ ] SES email backend
+- [ ] Lowercase email normalization
+- [ ] Static type checking (pyright/mypy)
 - [ ] Rate limiting on `/signup` and `/login`
 - [ ] Per-user database connections: credentials stored encrypted, engines created per connection and cached
 - [ ] Encrypted secrets storage for user-supplied database credentials (KMS-style)

@@ -15,3 +15,6 @@ GENERATE_LIMIT = get_rate_limit("RATE_LIMIT_GENERATE", "10/minute")
 SCHEMA_LIMIT = get_rate_limit("RATE_LIMIT_SCHEMA", "60/minute")
 
 generation_semaphore = asyncio.Semaphore(get_max_concurrent_generations())
+
+# Email Verification Resend
+RESEND_LIMIT = get_rate_limit("RATE_LIMIT_RESEND", "5/hour")
