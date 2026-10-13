@@ -894,3 +894,29 @@ Why delete the unverified account instead of clearing its password and linking: 
 - Rate limiting on `/signup` and `/login` (`/signup` also sends email).
 - Static type checker; Alembic.
 - Then `db_connections`, gated behind verification.
+
+## 29. Decision: Ship a v1 Early
+
+**Question:** complete every roadmap item before letting anyone use the product, or release a smaller v1 and keep developing in parallel with other projects?
+
+**Decision: ship a v1 early.**
+- Real feedback beats guessing: it's unknown which remaining items users actually need (billing and the DynamoDB rate-limit store may never matter).
+- Unreleased work accumulates untested assumptions.
+- A small shipped project with real users teaches deployment, monitoring, and support in a way building alone doesn't.
+
+**Constraint that shapes the cut line:** users hand over database credentials, so the security items are launch requirements, not polish: encrypted credentials, a read-only role and table allowlist, verification before connecting a database, and rate limits on `/signup` and `/login`. Also required: a minimal frontend that shows the generated SQL beside the result (a trust feature, since it lets users catch the model's mistakes and it is honest about the 67% benchmark accuracy), and a way to deliver email (SES, or invite-only signup).
+
+**Biggest unknown: hosting.** Colab plus ngrok cannot serve users. A GPU host (cost matters) or another way to run the model has to be chosen, so researching options and cost starts early and in parallel.
+
+**Release stages:** private alpha (people I know, sample or non-production data), then invite-only beta (real databases through read-only roles only), then public release once metering and billing exist.
+
+**Working in parallel with other projects:** tag the release (`v1.0`), do new work on feature branches so `main` stays stable, add CI (GitHub Actions running `pytest` on every push; the 94-test suite is the cheapest safety net for part-time work), keep a fixed weekly time block, and let alpha feedback choose the next item. Keep the alpha small, since every user costs support time.
+
+**Suggested order for the remaining v1 items:**
+1. Quick wins: lowercase emails, rate limits on `/signup` and `/login`, CI.
+2. `db_connections` with encryption, the verification gate, and the table allowlist.
+3. Minimal frontend.
+4. SES.
+5. Hosting research in parallel from the start; deployment last.
+
+The full v1 checklist lives in the README under "v1 Scope".
