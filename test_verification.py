@@ -21,6 +21,11 @@ def reset_limiter_storage():
 def client():
   return TestClient(app)
 
+@pytest.fixture(autouse=True)
+def no_real_control_plane():
+  with patch("app.auth.routes.get_control_plane_engine"):
+    yield
+
 
 def _engine_with(results):
   engine = MagicMock()
