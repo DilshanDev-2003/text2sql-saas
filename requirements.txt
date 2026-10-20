@@ -1,19 +1,22 @@
-sqlglot>=30.0.0
-pytest>=8.0.0
-python-dotenv
-slowapi
+# torch is installed separately (CPU wheel in CI; already present locally)
 
-# Authentication
-passlib[bcrypt]
-bcrypt==4.0.1
-pyjwt
-pydantic[email]
-
-# OAuth
-authlib
-itsdangerous
-httpx
-
+fastapi
+uvicorn
 sqlalchemy==2.1.1
 psycopg[binary]
 psycopg2-binary
+pydantic[email]
+slowapi
+python-dotenv
+sqlglot>=30.0.0
+passlib[bcrypt]
+bcrypt==4.0.1
+pyjwt
+authlib
+itsdangerous
+httpx
+transformers
+peft
+accelerate
+huggingface_hub
+pytest>=8.0.0
