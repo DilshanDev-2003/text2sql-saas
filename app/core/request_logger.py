@@ -1,14 +1,20 @@
 import json
+import logging
+import os
 import time
 from pathlib import Path
 
-LOG_PATH = "/content/drive/MyDrive/text2sql-eval/request_log.jsonl"
+logger = logging.getLogger(__name__)
+
+DEFAULT_LOG_PATH = "logs/request_log.jsonl"
+
+
+def _log_path() -> Path:
+  return Path(os.environ.get("REQUEST_LOG_PATH", DEFAULT_LOG_PATH))
+
 
 def log_request(question, n, duration_seconds, status_code, sql=None, error=None):
-  """
-    One json line per /generate request. Rather than print in a Colab, this writes the logs in a Google Drive.
-    After we can use them to create rate limitings, or any failure types.
-  """
+  """Appends one JSON line per /generate request; never raises."""
   record = {
     "timestamp": time.time(),
     "question": question,
@@ -18,6 +24,10 @@ def log_request(question, n, duration_seconds, status_code, sql=None, error=None
     "sql": sql,
     "error": error,
   }
-  Path(LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
-  with open(LOG_PATH, "a") as f:
-    f.write(json.dumps(record) + "\n")
+  try:
+    path = _log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+      f.write(json.dumps(record) + "\n")
+  except OSError:
+    logger.warning("Could not write request log", exc_info=True)

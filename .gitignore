@@ -31,3 +31,5 @@ checkpoint-*/
 
 # Environment secrets, if you add any later (API keys, tokens)
 .env
+
+logs/
