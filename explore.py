@@ -240,11 +240,19 @@ print(r.status_code, r.json())
 r = requests.post("http://localhost:8000/login", json={"email": "dilshanonline5@gmail.com", "password": "mypassword1"})
 print(r.status_code)
 
-"""
-
 import requests
 
 r = requests.post("http://localhost:8000/signup", json={"email": "Case.Test@Example.COM", "password": "testpass123"})
 print(r.status_code)
 r = requests.post("http://localhost:8000/signup", json={"email": "case.test@example.com", "password": "testpass123"})
 print(r.status_code)
+
+"""
+
+import requests
+
+codes = [
+  requests.post("http://localhost:8000/login", json={"email": "nobody@example.com", "password": "x"}).status_code
+  for _ in range(11)
+]
+print(codes)

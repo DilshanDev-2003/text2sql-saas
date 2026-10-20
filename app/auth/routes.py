@@ -10,7 +10,7 @@ from app.auth.verification import (
   verify_email_token,
   resend_verification,
 )
-from app.core.rate_limit import limiter, RESEND_LIMIT
+from app.core.rate_limit import limiter, RESEND_LIMIT, SIGNUP_LIMIT, LOGIN_LIMIT
 from app.auth.emails import NormalizedEmail
 
 router = APIRouter()
@@ -40,7 +40,8 @@ class TokenResponse(BaseModel):
 
 
 @router.post("/signup", response_model=TokenResponse)
-def signup(req: SignupRequest):
+@limiter.limit(SIGNUP_LIMIT)
+def signup(request: Request, response: Response, req: SignupRequest):
   engine = get_control_plane_engine()
   password_hash = hash_password(req.password)
 
@@ -63,7 +64,8 @@ def signup(req: SignupRequest):
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(req: LoginRequest):
+@limiter.limit(LOGIN_LIMIT)
+def login(request: Request, response: Response, req: LoginRequest):
   engine = get_control_plane_engine()
 
   with engine.connect() as conn:

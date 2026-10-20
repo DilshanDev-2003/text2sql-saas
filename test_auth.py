@@ -137,3 +137,36 @@ def test_login_lookup_uses_lowercased_email(client):
     client.post("/login", json={"email": "Mixed@Example.COM", "password": "whatever"})
 
   assert conn.execute.call_args.args[1] == {"email": "mixed@example.com"}
+
+def test_signup_is_rate_limited(client):
+  with patch("app.auth.routes.get_control_plane_engine") as mock_engine, \
+       patch("app.auth.routes.create_verification_token", return_value="tok"), \
+       patch("app.auth.routes.send_verification_email"), \
+       patch("app.auth.routes.hash_password", return_value="hashed"):
+    conn = mock_engine.return_value.begin.return_value.__enter__.return_value
+    conn.execute.return_value.first.return_value = None
+    conn.execute.return_value.scalar_one.return_value = 1
+
+    responses = [
+      client.post("/signup", json={"email": f"user{i}@example.com", "password": "testpass123"})
+      for i in range(11)
+    ]
+
+  assert [r.status_code for r in responses[:10]] == [200] * 10
+  assert responses[10].status_code == 429
+  assert "Retry-After" in responses[10].headers
+
+
+def test_login_is_rate_limited(client):
+  with patch("app.auth.routes.get_control_plane_engine") as mock_engine:
+    conn = mock_engine.return_value.connect.return_value.__enter__.return_value
+    conn.execute.return_value.first.return_value = None
+
+    responses = [
+      client.post("/login", json={"email": "a@example.com", "password": "wrong"})
+      for _ in range(11)
+    ]
+
+  assert [r.status_code for r in responses[:10]] == [401] * 10
+  assert responses[10].status_code == 429
+  assert "Retry-After" in responses[10].headers  

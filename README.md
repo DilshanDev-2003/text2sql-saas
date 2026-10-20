@@ -6,9 +6,9 @@ A text-to-SQL system: given a natural-language question and a database schema, i
 
 ## Status
 
-Actively in development. The generation pipeline (fine-tuned model, schema validation, majority-vote consistency checking) is built and tested, with **67.12% execution accuracy** on the full Spider dev set. Live database connectivity, the API layer (schema endpoint, health check, request logging, rate limiting, GPU concurrency guard), API-key authentication, password signup/login with JWT, Google OAuth login, fail-fast startup validation, and email verification are all built and covered by a 94-test suite.
+Actively in development. The generation pipeline (fine-tuned model, schema validation, majority-vote consistency checking) is built and tested, with **67.12% execution accuracy** on the full Spider dev set. Live database connectivity, the API layer (schema endpoint, health check, request logging, rate limiting, GPU concurrency guard), API-key authentication, password signup/login with JWT, Google OAuth login, email verification, email normalization, per-IP rate limits on the account endpoints, and fail-fast startup validation are all built and covered by a 106-test suite that runs in CI on every push.
 
-**Product direction:** an end-user website where a person logs in, connects their own database, asks questions in natural language, and sees results. The backend foundations (accounts, login, the layered architecture) are in place; per-user database connections and the frontend are next. The plan is to release a small, safe v1 early rather than finish every roadmap item first; see [v1 Scope](#v1-scope) and [Roadmap](#roadmap).
+**Product direction:** an end-user website where a person logs in, connects their own database, asks questions in natural language, and sees results. The backend foundations (accounts, login, the layered architecture, CI) are in place; per-user database connections and the frontend are next. The plan is to release a small, safe v1 early rather than finish every roadmap item first; see [v1 Scope](#v1-scope) and [Roadmap](#roadmap).
 
 ## How it works
 
@@ -19,9 +19,11 @@ Actively in development. The generation pipeline (fine-tuned model, schema valid
 5. Surviving candidates are executed through a pluggable executor, either against a SQLite eval file or a live database with read-only enforcement and a timeout (`query_guard.py`).
 6. The SQL whose *result* the most candidates agree on wins (self-consistency voting), and its SQL and result are returned as JSON. Failures return `422` (no valid query) or `503` (database unreachable or GPU busy).
 
-**Authentication:** programmatic callers use an `X-API-Key` header (keys are stored only as SHA-256 hashes). People use `POST /signup` and `POST /login` (bcrypt-hashed passwords, JWT access tokens) or Google sign-in via `GET /auth/google/login`. `GET /me` returns the authenticated user.
+Every `/generate` call appends one JSON line (question, duration, status, SQL; never result rows) to the request log at `REQUEST_LOG_PATH`. Logging failures never fail a request.
 
-**Email verification:** signup sends a verification email (a console backend for development; AWS SES is planned). `POST /auth/verify-email` confirms the token and `POST /auth/resend-verification` (rate limited) sends a new one. Google sign-in links to an existing account only when that account's email is verified; an unverified account with the same email is replaced by a fresh verified one, which prevents account pre-hijacking.
+**Authentication:** programmatic callers use an `X-API-Key` header (keys are stored only as SHA-256 hashes). People use `POST /signup` and `POST /login` (bcrypt-hashed passwords, JWT access tokens) or Google sign-in via `GET /auth/google/login`. `GET /me` returns the authenticated user. Email addresses are normalized to lowercase at every entry point, backed by a unique index on `lower(email)`. `/signup`, `/login`, and `/auth/resend-verification` are rate limited per IP.
+
+**Email verification:** signup sends a verification email (a console backend for development; AWS SES is planned). `POST /auth/verify-email` confirms the token and `POST /auth/resend-verification` sends a new one. Google sign-in links to an existing account only when that account's email is verified; an unverified account with the same email is replaced by a fresh verified one, which prevents account pre-hijacking.
 
 **Startup:** before loading the model, the server validates its configuration (required environment variables, database reachability, control-plane tables, and that the generation database is not the control plane) and fails with one readable message listing every problem.
 
@@ -30,22 +32,23 @@ Actively in development. The generation pipeline (fine-tuned model, schema valid
 ```
 app/
 ├── core/       config, rate_limit, request_logger, startup_checks, email_sender
-├── auth/       security (hashing, JWT, tokens), dependencies (API key / user), routes,
-│               verification, oauth, oauth_routes, users
+├── auth/       security (hashing, JWT, tokens), emails (normalization), dependencies (API key / user),
+│               routes, verification, oauth, oauth_routes, users
 ├── db/         connection (engine + schema introspection), runner (execution), query_guard (read-only)
 ├── services/   model_loader, model_utils, schema_validation, semantic_layer, inference
 ├── api/        routes/{generate,schema,health}.py, schemas.py
 └── main.py     app composition: lifespan, middleware, routers
 scripts/        create_key.py, eval/ (offline evaluation tooling)
-migrations/     001_control_plane.sql, 002_email_verification.sql
-conftest.py     test environment defaults
+migrations/     001_control_plane.sql, 002_email_verification.sql, 003_lowercase_emails.sql
+.github/workflows/tests.yml   CI: runs the test suite on every push and pull request
+conftest.py     hermetic test environment (fake secrets, pinned limits, limiter reset)
 test_*.py       test suite (run from the project root)
 ```
 
 | Layer | Responsibility |
 |---|---|
 | `app/core` | Cross-cutting concerns with no business logic: configuration from environment variables, rate limiting, request logging, startup validation, the email-sending interface. |
-| `app/auth` | Everything about identity. `security.py` holds pure functions with no database or web framework; `dependencies.py` holds the database-backed lookups and FastAPI dependencies. |
+| `app/auth` | Everything about identity. `security.py` and `emails.py` hold pure functions with no database or web framework; `dependencies.py` holds the database-backed lookups and FastAPI dependencies. |
 | `app/db` | Database access only: engines, schema introspection, safe execution, read-only enforcement. |
 | `app/services` | Product logic: model loading, prompting, schema validation, semantic layer, generation strategies. |
 | `app/api` | Thin FastAPI route handlers. |
@@ -61,21 +64,22 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Fill in `.env`. The main variables:
+`requirements.txt` does not install PyTorch (install it separately; CI uses the CPU wheel). Fill in `.env`. The main variables:
 
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | The database the model queries (a customer database, **not** the control plane) |
 | `CONTROL_PLANE_DATABASE_URL` | Your own database for users, API keys, OAuth identities, and verification tokens |
-| `JWT_SECRET`, `SESSION_SECRET` | Separate signing secrets (generate each with `python -c "import secrets; print(secrets.token_urlsafe(32))"`) |
+| `JWT_SECRET`, `SESSION_SECRET` | Separate signing secrets, at least 32 characters (generate each with `python -c "import secrets; print(secrets.token_urlsafe(32))"`) |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google OAuth client (optional `GOOGLE_REDIRECT_URI`) |
 | `HF_TOKEN` | Hugging Face token (the base model is gated) |
 | `WANDB_API_KEY` | Optional, for eval logging |
 | `EMAIL_BACKEND` | Email delivery backend; defaults to `console` (development only: it logs verification links) |
 | `FRONTEND_URL` | Base URL used in verification links |
-| `RATE_LIMIT_GENERATE`, `RATE_LIMIT_SCHEMA`, `RATE_LIMIT_RESEND`, `MAX_CONCURRENT_GENERATIONS` | Optional tuning |
+| `REQUEST_LOG_PATH` | File for `/generate` request logs; defaults to `logs/request_log.jsonl` (set it to a Drive path on Colab) |
+| `RATE_LIMIT_GENERATE`, `RATE_LIMIT_SCHEMA`, `RATE_LIMIT_SIGNUP`, `RATE_LIMIT_LOGIN`, `RATE_LIMIT_RESEND`, `MAX_CONCURRENT_GENERATIONS` | Optional tuning (defaults: 10/minute, 60/minute, 10/hour, 10/minute, 5/hour, 1) |
 
-Create the control-plane schema by running `migrations/001_control_plane.sql` and then `migrations/002_email_verification.sql` against the control-plane database. Then issue an API key:
+Create the control-plane schema by running the files in `migrations/` in order (`001`, `002`, `003`) against the control-plane database. Then issue an API key:
 
 ```bash
 python scripts/create_key.py "Tenant Name"
@@ -83,10 +87,17 @@ python scripts/create_key.py "Tenant Name"
 
 The key is printed once and only its hash is stored.
 
-To test authentication without a GPU, skip model loading:
+To test authentication without a GPU, skip model loading (this also skips the startup checks):
 
 ```bash
 SKIP_MODEL_LOAD=1 uvicorn app.main:app --port 8000
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:SKIP_MODEL_LOAD = "1"
+uvicorn app.main:app --port 8000
 ```
 
 Serving the model needs a GPU with enough VRAM and currently runs on Colab (local hardware is insufficient). In a Colab notebook: clone the repo, `pip install -r requirements-colab.txt`, load the variables above from Colab Secrets into `os.environ`, then run `uvicorn app.main:app --host 0.0.0.0 --port 8000` (expose it with `ngrok` for external testing). The code is environment-agnostic, so moving to a dedicated GPU host needs no code changes.
@@ -97,7 +108,7 @@ Serving the model needs a GPU with enough VRAM and currently runs on Colab (loca
 pytest -v
 ```
 
-94 tests covering schema validation, query execution, the read-only guard, inference orchestration (with model generation mocked, so no GPU is needed), the semantic layer, all API routes including rate-limit and GPU-busy paths, authentication (signup, login, JWT, OAuth with Google mocked), email verification, and startup validation.
+106 tests covering schema validation, query execution, the read-only guard, inference orchestration (with model generation mocked, so no GPU is needed), the semantic layer, all API routes including rate-limit and GPU-busy paths, authentication (signup, login, JWT, OAuth with Google mocked), email verification and normalization, request logging, and startup validation. The suite is hermetic: `conftest.py` supplies fake secrets and pins configuration, so it behaves the same on a laptop and in CI, where GitHub Actions runs it on every push and pull request on a clean Linux machine.
 
 ## Evaluation methodology
 
@@ -119,8 +130,9 @@ The plan is to release a small, safe v1 early, learn from real use, and keep bui
 
 ### Required for v1
 - [x] Accounts: password signup/login (JWT), Google sign-in, email verification (console email backend)
-- [ ] Lowercase email normalization (prevents one person becoming two accounts)
-- [ ] Rate limits on `/signup` and `/login`
+- [x] Lowercase email normalization
+- [x] Rate limits on `/signup` and `/login` (per IP)
+- [x] CI: automated `pytest` on every push
 - [ ] `db_connections`: encrypted credentials, one engine per connection (cached), gated behind a verified email
 - [ ] Read-only database role (users create it for the product) and a per-connection table allowlist
 - [ ] Large-schema handling: the table allowlist plus a prompt-size guard with a clear error. RAG schema retrieval joins v1 only if alpha databases exceed that limit; otherwise it is the first post-v1 item
@@ -128,7 +140,13 @@ The plan is to release a small, safe v1 early, learn from real use, and keep bui
 - [ ] Accuracy limits disclosed to users (67% execution accuracy on the Spider benchmark)
 - [ ] Real email delivery (AWS SES) or invite-only signup
 - [ ] Deployment: always-available GPU model hosting, HTTPS, monitoring
-- [ ] CI: automated `pytest` on every push
+
+### Hardening before the public stage
+- [ ] Per-account throttling of failed logins (progressive delay, not hard lockout)
+- [ ] Equalize `/login` timing for unknown emails (dummy password hash check)
+- [ ] Startup checks that refuse the console email backend and short secrets in deployed environments
+- [ ] Log retention policy and privacy statement (request logs contain questions and generated SQL)
+- [ ] Production proxy settings so rate limits see real client IPs
 
 ### After v1
 Second contrastive-training round, RAG schema retrieval (if not needed sooner), multi-dialect SQL, billing and metering, GitHub login, query history, account/usage page, shared rate-limit store, Alembic migrations, static type checking.
@@ -159,20 +177,21 @@ Built incrementally, driven by need rather than upfront completeness.
 - [x] Google OAuth login
 - [x] Fail-fast startup validation
 - [x] Email verification (console email backend; SES backend still to do)
+- [x] Lowercase email normalization (application layer plus unique index on `lower(email)`)
+- [x] Rate limiting on `/signup` and `/login` (per IP)
 - [ ] SES email backend
-- [ ] Lowercase email normalization
-- [ ] Static type checking (pyright/mypy)
-- [ ] Rate limiting on `/signup` and `/login`
 - [ ] Per-user database connections: credentials stored encrypted, engines created per connection and cached
 - [ ] Encrypted secrets storage for user-supplied database credentials (KMS-style)
 - [ ] Read-only database role and per-connection table allowlists for the generation connection
+- [ ] Per-account login throttling and `/login` timing equalization
+- [ ] Static type checking (pyright/mypy)
 - [ ] GitHub login
 
 ### Deployment Readiness
 - [x] Live database connectivity (SQLAlchemy, any engine)
 - [x] Model serving as a persistent API service
 - [x] API layer: schema endpoint, error handling (422/503), real health check, request logging, rate limiting, GPU concurrency guard
-- [ ] CI with automated tests
+- [x] CI with automated tests (GitHub Actions)
 - [ ] Shared rate-limit store (DynamoDB or Redis) for multi-instance deployment
 - [ ] Versioned database migrations with Alembic
 - [ ] Usage metering and billing

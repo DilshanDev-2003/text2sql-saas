@@ -18,3 +18,6 @@ generation_semaphore = asyncio.Semaphore(get_max_concurrent_generations())
 
 # Email Verification Resend
 RESEND_LIMIT = get_rate_limit("RATE_LIMIT_RESEND", "5/hour")
+
+SIGNUP_LIMIT = get_rate_limit("RATE_LIMIT_SIGNUP", "10/hour")
+LOGIN_LIMIT = get_rate_limit("RATE_LIMIT_LOGIN", "10/minute")

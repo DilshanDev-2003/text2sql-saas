@@ -920,3 +920,64 @@ Why delete the unverified account instead of clearing its password and linking: 
 5. Hosting research in parallel from the start; deployment last.
 
 The full v1 checklist lives in the README under "v1 Scope".
+
+## 30. CI with GitHub Actions, and Hermetic Tests
+
+**Workflow (`.github/workflows/tests.yml`):** runs `pytest` on every push to `main` and every pull request. Ubuntu, Python 3.13, pip cache, **CPU-only PyTorch installed first** (the default Linux wheel carries multi-GB CUDA libraries, and no test runs the model), then `requirements.txt`. `permissions: contents: read` (least privilege). No secrets are configured: tests use fake values and mock every external service.
+
+**What the first runs found:** a clean machine exposes what a laptop hides.
+- **Run #1** failed before the request-logger fix (most likely the hardcoded Drive log path; the log was not inspected).
+- **Run #2** (97 tests, 4 failures): the four route tests in `test_verification.py` patched `verify_email_token` / `resend_verification`, but the routes pass `get_control_plane_engine()` as an *argument*, which is evaluated before the patched function runs. The real function built an engine from `CONTROL_PLANE_DATABASE_URL`, which only existed on the laptop through `.env`. The tests had been silently depending on real configuration.
+- **Run #3** green.
+- It also confirmed `requirements.txt` is complete, since a fresh install ran every test.
+
+**Fixes and the hermetic-test rule:**
+- An autouse fixture patches `app.auth.routes.get_control_plane_engine` for all of `test_verification.py`.
+- `conftest.py` now pins everything the tests rely on: test secrets of at least 32 bytes (a 15-byte secret triggered PyJWT's `InsecureKeyLengthWarning`), `EMAIL_BACKEND=console`, `REQUEST_LOG_PATH` in a temp directory, pinned rate-limit settings, and **empty `DATABASE_URL` / `CONTROL_PLANE_DATABASE_URL`**. `load_dotenv()` never overrides an existing variable, so a pre-set empty value blocks `.env` from reaching tests, and the config getters treat empty as missing, so the laptop behaves like CI.
+- One autouse fixture resets rate-limit counters before and after every test, replacing three per-file copies.
+
+**Request logger redesign (`app/core/request_logger.py`):**
+- The old code hardcoded a Google Drive path. On Windows, `/content/drive/...` resolves under `C:\`, which Python can create (so tests quietly wrote there); on Linux it cannot.
+- The path now comes from `REQUEST_LOG_PATH` (default `logs/request_log.jsonl`, git-ignored), **read at call time**, and Colab sets it to a Drive path.
+- A write failure is caught and logged as a warning: **logging must never fail a request** (previously a full disk would have turned a successful generation into a `500`).
+- Three tests added. Privacy note: the log holds users' questions and generated SQL, so a retention policy and a privacy statement are needed before the public stage, and alpha testers should be told logs exist.
+
+## 31. Lowercase Email Normalization
+
+**Problem:** emails were compared as typed, so `A@x.com` and `a@x.com` could become two accounts, breaking login and the OAuth linking rules.
+
+**Options considered:** normalize in the app (clean data, but one forgotten path reintroduces the bug); `citext` (needs an extension and changes the column type); a unique index on `lower(email)` (database-enforced). **Decision: the first and third together**, since the index guarantees the invariant even if a future endpoint forgets to normalize, and existing `WHERE email = :email` queries keep working.
+
+**Implementation:**
+- `app/auth/emails.py`: `normalize_email` (strip, lowercase) and `NormalizedEmail = Annotated[EmailStr, AfterValidator(normalize_email)]`, used on the signup, login, and resend request models, so each endpoint normalizes in one declared place.
+- The Google callback normalizes explicitly, since its email doesn't pass through a request model.
+- `migrations/003_lowercase_emails.sql`: lowercases existing rows, then creates `users_email_lower_key`. A duplicate pre-check (`GROUP BY lower(email) HAVING count(*) > 1`, run first, returned zero rows) guards against silently merging accounts.
+- Deliberately not stripping `+tags` or dots: that is provider-specific and would merge distinct mailboxes. Lowercasing the local part is not strictly RFC-pure, but is universal practice.
+
+**Tests:** `test_emails.py` (3) plus signup, login, resend, and Google-callback cases. Suite 104.
+
+**Process note:** while fixing an `IndentationError` in `test_auth.py`, the signup test was accidentally dropped, and the resend test was never added. Caught by comparing the pytest list against the expected count (102 vs 104). Lesson: check counts after editing test files, and use `python -m py_compile <file>` to locate syntax errors fast.
+
+## 32. Rate Limits on `/signup` and `/login`
+
+**Why:** `/login` invites password guessing and credential stuffing; `/signup` invites account spam and email flooding (each signup sends mail, which can hurt SES sender reputation); both run bcrypt (about a quarter second of CPU each), so unlimited calls are a cheap way to tie up the server.
+
+**Design:** per-IP limits with the existing `slowapi` machinery, **deliberately generous** because many real users share an IP (universities, offices): `/login` 10/minute, `/signup` 10/hour, configurable through `RATE_LIMIT_LOGIN` and `RATE_LIMIT_SIGNUP`. The decorator sits below the route decorator and the function takes `request` and `response` parameters (needed for the rate-limit headers). Tests: two (`429` plus `Retry-After`), with `hash_password` patched so the 11-request loop stays fast. Suite 106.
+
+**What this does not solve:**
+
+| Gap | Note |
+|---|---|
+| Distributed attacks | A botnet stays under each IP's limit. Standard defense: a per-account limit on failed attempts with a progressive delay, not a hard lockout (a hard lockout lets an attacker lock a victim out). Before the public stage |
+| Shared state | Counters live in memory: reset on restart, not shared across servers. The DynamoDB/Redis roadmap item |
+| Real client IP behind a proxy | Needs correct forwarded-header settings; in production `--forwarded-allow-ips` must name the actual proxy, not `*`, or every user shares one bucket or an attacker spoofs one |
+| Bots on signup | CAPTCHA belongs in the frontend |
+
+**Found while reading `/login`: a timing side channel.** For an unknown email the code skips the password check (`row is None or ...` short-circuits), so that response is about 250 ms faster than a wrong-password one, letting an attacker discover which emails have accounts despite identical messages. Fix (queued): always run a dummy bcrypt verification.
+
+## Carried forward
+
+- **Next v1 step: `db_connections`** (design explained before code): encrypted credentials, engine per connection with a cache, gated behind email verification; then the table allowlist and read-only role guidance, the large-schema prompt-size guard, the minimal frontend (showing the SQL beside the result), SES, and hosting research in parallel.
+- Hardening queue: dummy bcrypt check in `/login`, per-account throttling, startup checks refusing the console email backend and short secrets in deployed environments, log retention and privacy statement, proxy settings.
+- Branch protection (require the `pytest` check on `main`), if not yet enabled.
+- Static type checker and Alembic after v1 work is under way.
