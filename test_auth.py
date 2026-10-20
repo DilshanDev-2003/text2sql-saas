@@ -56,6 +56,19 @@ def test_login_success(client, fake_user):
     assert r.status_code == 200
     assert "access_token" in r.json()
 
+def test_signup_stores_lowercased_email(client):
+  with patch("app.auth.routes.get_control_plane_engine") as mock_engine, \
+       patch("app.auth.routes.create_verification_token", return_value="tok"), \
+       patch("app.auth.routes.send_verification_email") as send:
+    conn = mock_engine.return_value.begin.return_value.__enter__.return_value
+    conn.execute.return_value.first.return_value = None
+    conn.execute.return_value.scalar_one.return_value = 1
+
+    r = client.post("/signup", json={"email": "Mixed@Example.COM", "password": "testpass123"})
+
+  assert r.status_code == 200
+  send.assert_called_once_with("mixed@example.com", "tok")
+  assert conn.execute.call_args_list[1].args[1]["email"] == "mixed@example.com"      
 
 def test_login_wrong_password_returns_401(client, fake_user):
   hashed = hash_password(fake_user["password"])
@@ -100,3 +113,27 @@ def test_me_missing_header_returns_422(client):
 def test_me_garbage_token_returns_401(client):
   r = client.get("/me", headers={"Authorization": "Bearer garbage.token.value"})
   assert r.status_code == 401
+
+  def test_signup_stores_lowercased_email(client):
+    with patch("app.auth.routes.get_control_plane_engine") as mock_engine, \
+        patch("app.auth.routes.create_verification_token", return_value="tok"), \
+        patch("app.auth.routes.send_verification_email") as send:
+      conn = mock_engine.return_value.begin.return_value.__enter__.return_value
+      conn.execute.return_value.first.return_value = None
+      conn.execute.return_value.scalar_one.return_value = 1
+
+      r = client.post("/signup", json={"email": "Mixed@Example.COM", "password": "testpass123"})
+
+    assert r.status_code == 200
+    send.assert_called_once_with("mixed@example.com", "tok")
+    assert conn.execute.call_args_list[1].args[1]["email"] == "mixed@example.com"
+
+
+def test_login_lookup_uses_lowercased_email(client):
+  with patch("app.auth.routes.get_control_plane_engine") as mock_engine:
+    conn = mock_engine.return_value.connect.return_value.__enter__.return_value
+    conn.execute.return_value.first.return_value = None
+
+    client.post("/login", json={"email": "Mixed@Example.COM", "password": "whatever"})
+
+  assert conn.execute.call_args.args[1] == {"email": "mixed@example.com"}

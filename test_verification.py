@@ -154,3 +154,9 @@ def test_signup_sends_verification_email(client):
 
   assert r.status_code == 200
   send.assert_called_once_with("a@example.com", "tok")
+
+def test_resend_route_lowercases_email(client):
+  with patch("app.auth.routes.resend_verification") as resend:
+    client.post("/auth/resend-verification", json={"email": "Mixed@Example.COM"})
+
+  assert resend.call_args.args[1] == "mixed@example.com"

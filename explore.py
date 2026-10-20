@@ -1,7 +1,8 @@
+"""
 import sqlglot
 from sqlglot.expressions import Table, Column
 
-"""
+
 query = "SELECT name, age FROM singer WHERE country = 'France'"
 parsed = sqlglot.parse_one(query)
 
@@ -240,3 +241,10 @@ r = requests.post("http://localhost:8000/login", json={"email": "dilshanonline5@
 print(r.status_code)
 
 """
+
+import requests
+
+r = requests.post("http://localhost:8000/signup", json={"email": "Case.Test@Example.COM", "password": "testpass123"})
+print(r.status_code)
+r = requests.post("http://localhost:8000/signup", json={"email": "case.test@example.com", "password": "testpass123"})
+print(r.status_code)

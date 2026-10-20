@@ -1,5 +1,7 @@
 # Text2SQL SaaS
 
+![tests](https://github.com/DilshanDev-2003/text2sql-saas/actions/workflows/tests.yml/badge.svg)
+
 A text-to-SQL system: given a natural-language question and a database schema, it generates correct SQL. It is built around a fine-tuned Llama 3.2 3B model, with a schema-validation and self-consistency layer that catches and corrects common failure modes before an answer is returned. It runs against either a static evaluation database (SQLite/Spider) or a live database (SQLAlchemy), and is served as a persistent FastAPI service with API-key and JWT/OAuth authentication.
 
 ## Status

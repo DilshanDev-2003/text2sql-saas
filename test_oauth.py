@@ -142,11 +142,6 @@ def test_new_user_is_created_verified_with_linked_identity():
   assert conn.execute.call_count == 4
   assert "email_verified_at" in str(conn.execute.call_args_list[2].args[0])
 
-
-
-
-
-
 def test_login_oauth_only_user_returns_401_not_500(client):
   with patch("app.auth.routes.get_control_plane_engine") as mock_engine:
     conn = mock_engine.return_value.connect.return_value.__enter__.return_value
@@ -156,3 +151,13 @@ def test_login_oauth_only_user_returns_401_not_500(client):
     r = client.post("/login", json={"email": "a@example.com", "password": "whatever"})
 
   assert r.status_code == 401
+
+def test_callback_lowercases_email_before_lookup(client):
+  oauth = fake_oauth(authorize_access_token=AsyncMock(return_value=google_token(email="Mixed@Example.COM")))
+
+  with patch("app.auth.oauth_routes.get_oauth", return_value=oauth), \
+       patch("app.auth.oauth_routes.find_or_create_oauth_user", return_value=5) as find:
+    r = client.get("/auth/google/callback")
+
+  assert r.status_code == 200
+  find.assert_called_once_with("google", "google-123", "mixed@example.com")  

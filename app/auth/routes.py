@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.auth.dependencies import get_control_plane_engine
@@ -11,17 +11,18 @@ from app.auth.verification import (
   resend_verification,
 )
 from app.core.rate_limit import limiter, RESEND_LIMIT
+from app.auth.emails import NormalizedEmail
 
 router = APIRouter()
 
 
 class SignupRequest(BaseModel):
-  email: EmailStr
+  email: NormalizedEmail
   password: str
 
 
 class LoginRequest(BaseModel):
-  email: EmailStr
+  email: NormalizedEmail
   password: str
 
 
@@ -30,7 +31,7 @@ class VerifyEmailRequest(BaseModel):
 
 
 class ResendRequest(BaseModel):
-  email: EmailStr
+  email: NormalizedEmail
 
 
 class TokenResponse(BaseModel):

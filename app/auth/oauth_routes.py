@@ -6,6 +6,7 @@ from app.auth.routes import TokenResponse
 from app.auth.security import create_access_token
 from app.auth.users import find_or_create_oauth_user
 from app.core.config import get_google_redirect_uri
+from app.auth.emails import normalize_email
 
 router = APIRouter()
 
@@ -26,5 +27,5 @@ async def google_callback(request: Request):
   if not userinfo or not userinfo.get("email_verified"):
     raise HTTPException(status_code=400, detail="Google account email is not verified.")
 
-  user_id = find_or_create_oauth_user("google", userinfo["sub"], userinfo["email"])
+  user_id = find_or_create_oauth_user("google", userinfo["sub"], normalize_email(userinfo["email"]))
   return TokenResponse(access_token=create_access_token(user_id))
