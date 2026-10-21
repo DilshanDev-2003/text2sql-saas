@@ -1,6 +1,8 @@
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import Engine
 
+from app.db.connection_safety import ValidatedTarget
+
 def get_engine(connection_string: str, statement_timeout_ms: int = 5000) -> Engine:
   """
     Creates a SQLAlchemy engine for any supported database with connection_string.
@@ -58,3 +60,19 @@ def get_sqlglot_dialect(engine: Engine) -> str:
     raise ValueError(f"No sqlglot dialect mapping for sqlalchemy dialect: {name!r}")
   else:
     return SQLALCHEMY_TO_SQLGLOT_DIALECT[name]
+
+def build_customer_engine(target: ValidatedTarget, statement_timeout_ms: int = 5000, connect_timeout_s: int = 5,) -> Engine:
+  return create_engine(
+    target.url,
+    pool_size=2,
+    max_overflow=0,
+    pool_timeout=10,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    connect_args={
+      "hostaddr": target.hostaddr,
+      "connect_timeout": connect_timeout_s,
+      "application_name": "text2sql-saas",
+      "options": f"-c statement_timeout={statement_timeout_ms} -c default_transaction_read_only=on",
+    },
+  )
