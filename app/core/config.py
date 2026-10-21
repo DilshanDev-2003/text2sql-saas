@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+import base64
 
 load_dotenv()
 
@@ -72,3 +73,17 @@ def get_email_backend() -> str:
 
 def get_frontend_url() -> str:
   return os.environ.get("FRONTEND_URL", "http://localhost:3000")
+
+# Database Connections
+def get_encryption_backend() -> str:
+  return os.environ.get("ENCRYPTION_BACKEND", "local")
+
+def get_encryption_keys() -> dict[int, bytes]:
+  keys = {}
+  for item in get_required_env("ENCRYPTION_KEYS").split(","):
+    version, _, encoded = item.strip().partition(":")
+    keys[int(version)] = base64.b64decode(encoded)
+  return keys
+
+def get_encryption_key_version() -> int:
+  return int(get_required_env("ENCRYPTION_KEY_VERSION"))

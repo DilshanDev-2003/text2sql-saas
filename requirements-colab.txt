@@ -33,3 +33,5 @@ pydantic[email]
 authlib
 itsdangerous
 httpx
+
+cryptography
