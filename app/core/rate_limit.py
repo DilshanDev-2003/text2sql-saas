@@ -21,3 +21,6 @@ RESEND_LIMIT = get_rate_limit("RATE_LIMIT_RESEND", "5/hour")
 
 SIGNUP_LIMIT = get_rate_limit("RATE_LIMIT_SIGNUP", "10/hour")
 LOGIN_LIMIT = get_rate_limit("RATE_LIMIT_LOGIN", "10/minute")
+
+CONNECTIONS_CREATE_LIMIT = get_rate_limit("RATE_LIMIT_CONNECTIONS_CREATE", "10/hour")
+CONNECTIONS_LIMIT = get_rate_limit("RATE_LIMIT_CONNECTIONS", "60/minute")

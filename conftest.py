@@ -13,6 +13,8 @@ os.environ["RATE_LIMIT_SCHEMA"] = "60/minute"
 os.environ["RATE_LIMIT_SIGNUP"] = "10/hour"
 os.environ["RATE_LIMIT_LOGIN"] = "10/minute"
 os.environ["RATE_LIMIT_RESEND"] = "5/hour"
+os.environ["RATE_LIMIT_CONNECTIONS_CREATE"] = "10/hour"
+os.environ["RATE_LIMIT_CONNECTIONS"] = "60/minute"
 
 #Counters are shared across the whole test run. Now that /signup and /login are limited, any test file that calls them could inherit counts from earlier files. One autouse fixture covers every file. You can then delete the three per-file reset_limiter_storage fixtures (test_app.py, test_auth.py, test_verification.py), which are now duplicates.
 @pytest.fixture(autouse=True)

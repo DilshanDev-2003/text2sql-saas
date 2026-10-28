@@ -24,12 +24,7 @@ def _dispose(entries: list[CachedConnection]) -> None:
 
 
 class ConnectionCache:
-  def __init__(
-    self,
-    max_size: int = 20,
-    ttl_seconds: float = 600,
-    clock: Callable[[], float] = time.monotonic,
-  ):
+  def __init__(self, max_size: int = 20, ttl_seconds: float = 600, clock: Callable[[], float] = time.monotonic,):
     self._max_size = max_size
     self._ttl = ttl_seconds
     self._clock = clock

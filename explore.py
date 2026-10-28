@@ -247,7 +247,6 @@ print(r.status_code)
 r = requests.post("http://localhost:8000/signup", json={"email": "case.test@example.com", "password": "testpass123"})
 print(r.status_code)
 
-"""
 
 import requests
 
@@ -256,3 +255,36 @@ codes = [
   for _ in range(11)
 ]
 print(codes)
+
+import requests
+
+base = "http://localhost:8000"
+email = "alpha-test@examplex.com"
+password = "Dilshan161218"
+
+r = requests.post(f"{base}/signup", json={"email": email, "password": password})
+print(r.status_code)
+
+"""
+import requests
+
+base = "http://localhost:8000"
+email = "alpha-test@examplex.com"
+password = "Dilshan161218"
+
+token = requests.post(f"{base}/login", json={"email": email, "password": password}).json()["access_token"]
+headers = {"Authorization": f"Bearer {token}"}
+
+good = "postgresql://neondb_owner:npg_sKCJ7i3qnXBT@ep-billowing-wildflower-b3syyenv.c-4.ap-southeast-1.aws.neon.tech/customer_test?sslmode=require&channel_binding=require"
+for body in [
+  {"name": "Test", "connection_string": good},
+  {"name": "Test", "connection_string": good},
+  {"name": "Local", "connection_string": "postgresql://u:p@localhost/db"},
+  {"name": "Weak", "connection_string": good.split("?")[0] + "?sslmode=disable"},
+]:
+  r = requests.post(f"{base}/connections", headers=headers, json=body)
+  print(r.status_code, r.json())
+
+print(requests.get(f"{base}/connections", headers=headers).json())
+
+

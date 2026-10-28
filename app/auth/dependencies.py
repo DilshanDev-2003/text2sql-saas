@@ -1,5 +1,5 @@
 # The FastAPI dependency that checks a key on every request.
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Depends
 from sqlalchemy import create_engine, text
 from app.core.config import get_control_plane_connection_string
 from app.auth.security import hash_api_key, decode_access_token
@@ -45,4 +45,17 @@ async def require_user(authorization: str = Header(...)) -> int:
   if user_id is None:
     raise HTTPException(status_code=401, detail="Invalid or Expired Token")
 
+  return user_id
+
+def require_verified_user(user_id: int = Depends(require_user)) -> int:
+  with get_control_plane_engine().connect() as conn:
+    row = conn.execute(
+      text("SELECT email_verified_at FROM users WHERE id = :id"),
+      {"id": user_id},
+    ).first()
+
+  if row is None:
+    raise HTTPException(status_code=401, detail="Invalid or expired token.")
+  if row.email_verified_at is None:
+    raise HTTPException(status_code=403, detail="Verify your email address before connecting a database.")
   return user_id

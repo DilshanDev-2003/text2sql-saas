@@ -22,12 +22,16 @@ from app.core.startup_checks import (
   StartupError, check_environment, check_schema, check_control_plane, raise_if_problems,
 )
 from app.auth.dependencies import require_user, get_control_plane_engine
+from app.api.routes.connections import router as connections_router
+from app.services.connection_cache import ConnectionCache
 
 logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
   """Validates configuration, connects to the live database, then loads the model."""
+  app.state.connection_cache = ConnectionCache()
+
   if os.environ.get("SKIP_MODEL_LOAD") != "1":
     raise_if_problems(check_environment())
 
@@ -46,6 +50,8 @@ async def lifespan(app: FastAPI):
 
   yield
 
+  app.state.connection_cache.clear()
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -59,6 +65,7 @@ app.include_router(generate_router)
 app.include_router(schema_router)
 app.include_router(health_router)
 app.include_router(oauth_router)
+app.include_router(connections_router)
 
 
 @app.get("/me")
