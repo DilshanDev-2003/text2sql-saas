@@ -9,7 +9,6 @@ os.environ["CONTROL_PLANE_DATABASE_URL"] = ""
 os.environ["REQUEST_LOG_PATH"] = os.path.join(tempfile.gettempdir(), "text2sql_test_request_log.jsonl")
 
 os.environ["RATE_LIMIT_GENERATE"] = "10/minute"
-os.environ["RATE_LIMIT_SCHEMA"] = "60/minute"
 os.environ["RATE_LIMIT_SIGNUP"] = "10/hour"
 os.environ["RATE_LIMIT_LOGIN"] = "10/minute"
 os.environ["RATE_LIMIT_RESEND"] = "5/hour"

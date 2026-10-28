@@ -13,7 +13,6 @@ from app.core.rate_limit import limiter
 from app.auth.dependencies import require_user
 from app.auth.routes import router as auth_router
 from app.api.routes.generate import router as generate_router
-from app.api.routes.schema import router as schema_router
 from app.api.routes.health import router as health_router
 from starlette.middleware.sessions import SessionMiddleware
 from app.core.config import get_session_secret
@@ -62,7 +61,6 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.include_router(auth_router)
 app.include_router(generate_router)
-app.include_router(schema_router)
 app.include_router(health_router)
 app.include_router(oauth_router)
 app.include_router(connections_router)

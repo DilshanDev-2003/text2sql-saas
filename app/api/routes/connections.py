@@ -47,3 +47,18 @@ def remove_connection(request: Request, response: Response, connection_id: int, 
     )
   except ConnectionServiceError as error:
     raise connection_http_error(error) from None
+
+@router.get("/connections/{connection_id}/schema")
+@limiter.limit(CONNECTIONS_LIMIT)
+def get_connection_schema(request: Request, response: Response, connection_id: int, user_id: int = Depends(require_user),):
+  try:
+    entry = connections.get_connection_entry(
+      get_control_plane_engine(),
+      request.app.state.connection_cache,
+      get_encryptor,
+      user_id,
+      connection_id,
+    )  
+  except (ConnectionServiceError, UnsafeConnectionError) as error:
+    raise connection_http_error(error) from None
+  return entry.schema

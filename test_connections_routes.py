@@ -118,7 +118,7 @@ def test_create_rejects_missing_fields(client):
 
 @pytest.mark.parametrize(
   "method,path",
-  [("get", "/connections"), ("post", "/connections"), ("delete", "/connections/7")],
+  [("get", "/connections"), ("get", "/connections/7/schema"), ("post", "/connections"), ("delete", "/connections/7"),],
 )
 def test_connection_routes_reject_invalid_tokens(client, method, path):
   app.dependency_overrides.clear()
@@ -138,3 +138,21 @@ def test_create_requires_a_verified_email(client):
 
   assert r.status_code == 403
   create.assert_not_called()
+
+def test_schema_route_returns_the_connections_schema(client):
+  entry = SimpleNamespace(schema={"singer": {"columns": []}})
+  with patch("app.services.connections.get_connection_entry", return_value=entry) as get_entry:
+    r = client.get("/connections/7/schema")
+
+  assert r.status_code == 200
+  assert r.json() == {"singer": {"columns": []}}
+  assert get_entry.call_args.args[3:] == (3, 7)
+
+
+def test_schema_route_unknown_connection_returns_404(client):
+  error = connections.ConnectionNotFound("Connection not found.")
+  with patch("app.services.connections.get_connection_entry", side_effect=error):
+    r = client.get("/connections/7/schema")
+
+  assert r.status_code == 404
+  assert r.json()["detail"] == "Connection not found."  

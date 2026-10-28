@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 
 class GenerateRequest(BaseModel):
   question: str
@@ -20,3 +20,9 @@ class ConnectionOut(BaseModel):
   database_name: str
   created_at: datetime
   last_connected_at: datetime | None = None  
+
+MAX_CANDIDATES = 10
+class GenerateRequest(BaseModel):
+  connection_id: int
+  question: str = Field(min_length=1, max_length=2000)
+  n: int = Field(default=5, ge=1, le=MAX_CANDIDATES)  

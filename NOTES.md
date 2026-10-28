@@ -981,3 +981,74 @@ The full v1 checklist lives in the README under "v1 Scope".
 - Hardening queue: dummy bcrypt check in `/login`, per-account throttling, startup checks refusing the console email backend and short secrets in deployed environments, log retention and privacy statement, proxy settings.
 - Branch protection (require the `pytest` check on `main`), if not yet enabled.
 - Static type checker and Alembic after v1 work is under way.
+
+## 33. Per-User Database Connections: Foundations (migration 004 through the endpoints)
+
+**Goal:** the product shape is "a person connects their own database", so the single fixed generation database had to become per-user, stored encrypted, safely reachable, and cached. Built in small tested steps: schema, encryption, safety validation, engine builder and cache, service, endpoints. Suite 106 to 218.
+
+**Encryption (`app/core/encryption.py`).**
+
+| Option | Verdict |
+|---|---|
+| App-level AES-GCM, key from environment | **Chosen first.** Simple and testable; a database leak alone reveals nothing |
+| Envelope encryption with AWS KMS | **Planned next**, as a new backend behind the same interface (master key never leaves KMS, IAM-controlled, audited, built-in rotation) |
+| `pgcrypto` | Avoided: keys travel through SQL and logs |
+| Secrets Manager (one secret per connection) | Per-secret cost and a call on every connect |
+
+- An `Encryptor` Protocol with a factory chosen by `ENCRYPTION_BACKEND` (same pattern as `EmailSender`; an unknown backend raises).
+- Authenticated encryption: tampering fails decryption. A fresh random nonce each time, so identical plaintexts never repeat.
+- The ciphertext is bound to **`user:<id>`** as authenticated context, so copying one user's value into another row fails to decrypt. Bound to the user, not the connection id, because the id doesn't exist until the row is inserted.
+- Key versions (`ENCRYPTION_KEYS="1:<base64>,2:..."`, `ENCRYPTION_KEY_VERSION`): rotate by adding a key and raising the version; old rows still decrypt.
+- Driver detail: psycopg2 returns `bytea` as `memoryview`, so decryption converts with `bytes(...)` (tested).
+- Operational rules: back the key up (losing it makes every stored connection unreadable), never commit it, and use the **same key everywhere that shares a control-plane database** (laptop and Colab).
+
+**Schema (`migrations/004_db_connections.sql`).** `host` and `database_name` in plain text so the UI can list connections without decrypting; `key_version`; `ON DELETE CASCADE` on the user; `UNIQUE (user_id, name)`. No `allowed_tables` or `dialect` column yet (they arrive with their own features, the same discipline as `email_verified_at`).
+
+**Safety validation (`app/db/connection_safety.py`): users can name any host, so this is SSRF defense.**
+- Only PostgreSQL; the driver is rewritten to one canonical value; `postgres://` accepted.
+- User, password, database, and a real host are required (no unix sockets).
+- **Only `sslmode` and `channel_binding` are allowed as query parameters.** libpq reads `host=`, `hostaddr=`, `options=`, and certificate file paths from the query string, so `?host=10.0.0.5` would bypass a host check.
+- TLS required (`require` or stronger; absent means `require`).
+- Every resolved address must be globally routable. Private, loopback, link-local, carrier-grade NAT, and multicast are rejected, and `::ffff:127.0.0.1` is unwrapped first. One bad address among several rejects the host.
+- Unresolvable and private hosts return the **same message**, so error differences can't be used to probe which internal DNS names exist.
+- The validator returns the checked address (`hostaddr`) and the engine connects to *that* address, while the hostname is kept for TLS. This defeats DNS rebinding (a hostname answering public for the check and private for the connection).
+- Errors never contain the connection string (`raise ... from None`), and the resolver is injectable so tests need no real DNS.
+- Known limits: `sslmode=require` encrypts but doesn't verify certificates (`verify-full` is accepted but needs a CA bundle); `getaddrinfo` has no timeout; deployment should add egress rules denying private ranges and the metadata address as a second layer; connection endpoints could be used to probe public hosts, so they are rate limited.
+
+**Engine builder and cache.**
+- `build_customer_engine`: pool of 2 with no overflow, connect and pool timeouts, `statement_timeout`, `application_name=text2sql-saas` (so the customer's DBA recognizes our sessions), and `default_transaction_read_only=on`. The last is **defense in depth only**, since a session can switch it back off; the real boundaries are the read-only database role (recommended to users) and `guard_readonly`.
+- Known catch: connection poolers (PgBouncer, Neon `-pooler` hosts) reject startup `options` (the Phase 12 lesson). The failure message tells users to use the direct string; a later fix is `SET LOCAL` per transaction.
+- `ConnectionCache`: bounded (20 engines), least-recently-used, 10-minute TTL (which also bounds how stale a cached schema can get), thread-safe, engines disposed **outside** the lock, injectable clock for tests, per-process. It is only a speedup, never authorization.
+
+**Service (`app/services/connections.py`).**
+- **Every query includes `user_id`**: someone else's id looks identical to a missing one (no existence leak; IDOR prevention). Ownership is checked **before** the cache.
+- Test-connect and introspect **before** saving (a bad connection is never stored; reading the schema also proves read access); the tested engine goes straight into the cache.
+- The target is **revalidated on every engine rebuild**, because DNS changes after saving.
+- User-safe error messages only; logs carry the exception class name, never driver text.
+- Races accepted: the limit of 5 can be exceeded by one under concurrency, and duplicate engine builds on a cache miss are harmless.
+
+**Endpoints (`/connections`).**
+- `POST` requires a **verified email, checked against the database** (a signed token can't tell you the account was later deleted, as in the OAuth takeover case); it is rate limited to 10/hour because each call makes the server open an outbound connection.
+- `SecretStr` for the connection string; the response never echoes it.
+- One shared error-to-status table in `app/api/errors.py`: 400 unsafe host or failed test, 404 not found (including other people's), 409 name taken, limit reached, or unreadable, 422 bad name, 401/403 for token and verification.
+
+**Verified manually (real Neon database):** `201` on the first save, `409` duplicate name, `400` for `localhost` (the SSRF check) and for `sslmode=disable`, and a list showing metadata only. Minor: `last_connected_at` (app clock) was about 340 ms earlier than `created_at` (database clock); use `now()` in SQL if consistency matters.
+
+## 34. Rewiring `/generate` to Connections (step 6a), and Testing Lessons
+
+**Changes:** `/generate` takes `connection_id` with the user's JWT; the connection lookup runs **before** the GPU lock so a slow connect never holds the GPU; **`n` is bounded to 1 through 10** (each candidate is a GPU pass *and* a query on the customer's database, so unbounded `n` let one request monopolize the GPU and load their server); `/schema` moved to `GET /connections/{id}/schema`; `/health` now checks the model and the **control plane** and its key was renamed `database` to `control_plane`; the old API-key path no longer guards any route (the code stays, since per-user API keys may return). Suite 219.
+
+**Testing lessons:**
+1. **Tests can pass for the wrong reason.** A `404` test passed because the route wasn't registered; two `422` tests passed because every request returned `422`. Assert something only the intended path produces (the error message, or which field failed).
+2. **Half-replaced files.** `health.py` mixed old and new code, and `generate.py` still depended on `require_api_key`, so every request got `422` for a missing header. Replace whole files when a design changes; `findstr` for the old dependency name is a fast check.
+3. **Count the tests.** 218 instead of 219 revealed a parametrization case that had been replaced instead of extended.
+4. **Never paste secrets into chats or notebook cells.** Use `getpass` or environment variables. An `input()` call whose prompt is the token looks like a hung cell.
+
+**Carried forward:**
+- **Step 6b:** lifespan without a fixed generation database (no `DATABASE_URL`, no schema checks); startup checks for `ENCRYPTION_KEYS` and `ENCRYPTION_KEY_VERSION`; then an end-to-end test of `/generate` on Colab.
+- **Result row cap:** `execute_live` fetches all rows, so a query on a big table can exhaust memory and produce an enormous response; needs a hard cap with a `truncated` flag.
+- Per-connection table allowlist and read-only role guidance; prompt-size guard for large schemas.
+- KMS backend for the `Encryptor`.
+- Rate limits keyed by user instead of IP (still per IP today); pooler support via `SET LOCAL`.
+- Confirm `cryptography` is in both requirements files and CI stays green after the push.
+- README refresh after 6b.

@@ -12,7 +12,6 @@ def client_key(request: Request) -> str:
 limiter = Limiter(key_func=client_key, headers_enabled=True, swallow_errors=True)
 
 GENERATE_LIMIT = get_rate_limit("RATE_LIMIT_GENERATE", "10/minute")
-SCHEMA_LIMIT = get_rate_limit("RATE_LIMIT_SCHEMA", "60/minute")
 
 generation_semaphore = asyncio.Semaphore(get_max_concurrent_generations())
 
