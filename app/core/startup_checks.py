@@ -3,15 +3,24 @@ import os
 from huggingface_hub import get_token
 from sqlalchemy import inspect
 
+from app.core.encryption import get_encryptor
+
 REQUIRED_ENV_VARS = [
-  "DATABASE_URL",
   "CONTROL_PLANE_DATABASE_URL",
   "JWT_SECRET",
   "SESSION_SECRET",
+  "ENCRYPTION_KEYS",
+  "ENCRYPTION_KEY_VERSION",
 ]
 
-CONTROL_PLANE_TABLES = {"tenants", "api_keys", "users"}
-CONTROL_PLANE_FINGERPRINT = {"api_keys", "oauth_identities"}
+CONTROL_PLANE_TABLES = {
+  "tenants",
+  "api_keys",
+  "users",
+  "oauth_identities",
+  "email_verifications",
+  "db_connections",
+}
 
 
 class StartupError(RuntimeError):
@@ -29,11 +38,17 @@ def check_environment() -> list[str]:
   return problems
 
 
-def check_schema(live_schema: dict) -> list[str]:
-  if not live_schema:
-    return ["The generation database has no tables in the 'public' schema."]
-  if CONTROL_PLANE_FINGERPRINT <= set(live_schema):
-    return ["The generation database contains the control-plane tables; point DATABASE_URL at customer data."]
+def check_encryption() -> list[str]:
+  try:
+    encryptor = get_encryptor()
+    probe = encryptor.encrypt("startup-check", "startup")
+    if encryptor.decrypt(probe.ciphertext, probe.key_version, "startup") != "startup-check":
+      raise ValueError("round trip mismatch")
+  except Exception as e:
+    return [
+      f"Encryption is misconfigured ({type(e).__name__}). Check ENCRYPTION_BACKEND, "
+      "ENCRYPTION_KEYS (format 1:<base64 32-byte key>), and ENCRYPTION_KEY_VERSION."
+    ]
   return []
 
 

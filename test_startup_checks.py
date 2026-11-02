@@ -1,4 +1,5 @@
 import pytest
+import base64
 from unittest.mock import patch
 
 from app.core import startup_checks as sc
@@ -17,7 +18,7 @@ def test_environment_ok(env):
 
 def test_environment_reports_every_missing_variable(env, monkeypatch):
   monkeypatch.delenv("JWT_SECRET")
-  monkeypatch.delenv("DATABASE_URL")
+  monkeypatch.delenv("ENCRYPTION_KEYS")
   with patch.object(sc, "get_token", return_value="hf_x"):
     assert len(sc.check_environment()) == 2
 
@@ -25,18 +26,6 @@ def test_environment_reports_every_missing_variable(env, monkeypatch):
 def test_environment_reports_missing_hf_token(env):
   with patch.object(sc, "get_token", return_value=None):
     assert len(sc.check_environment()) == 1
-
-
-def test_empty_schema_rejected():
-  assert sc.check_schema({})
-
-
-def test_control_plane_tables_in_generation_database_rejected():
-  assert sc.check_schema({"api_keys": {}, "oauth_identities": {}, "singer": {}})
-
-
-def test_customer_schema_with_users_table_is_allowed():
-  assert sc.check_schema({"users": {}, "orders": {}}) == []
 
 
 def test_control_plane_missing_tables_reported():
@@ -59,3 +48,47 @@ def test_raise_if_problems_lists_everything():
 
 def test_raise_if_problems_noop_when_empty():
   sc.raise_if_problems([])
+
+def valid_encryption_env(monkeypatch):
+  monkeypatch.setenv("ENCRYPTION_BACKEND", "local")
+  monkeypatch.setenv("ENCRYPTION_KEYS", "1:" + base64.b64encode(b"k" * 32).decode())
+  monkeypatch.setenv("ENCRYPTION_KEY_VERSION", "1")
+
+
+def test_encryption_ok(monkeypatch):
+  valid_encryption_env(monkeypatch)
+  assert sc.check_encryption() == []
+
+
+def test_encryption_problem_never_reveals_the_key(monkeypatch):
+  raw_key = base64.b64encode(b"k" * 32).decode()
+  monkeypatch.setenv("ENCRYPTION_BACKEND", "local")
+  monkeypatch.setenv("ENCRYPTION_KEYS", raw_key)
+  monkeypatch.setenv("ENCRYPTION_KEY_VERSION", "1")
+
+  problems = sc.check_encryption()
+
+  assert len(problems) == 1
+  assert raw_key not in problems[0]
+
+
+def test_encryption_rejects_a_key_of_the_wrong_length(monkeypatch):
+  monkeypatch.setenv("ENCRYPTION_BACKEND", "local")
+  monkeypatch.setenv("ENCRYPTION_KEYS", "1:" + base64.b64encode(b"short").decode())
+  monkeypatch.setenv("ENCRYPTION_KEY_VERSION", "1")
+
+  assert len(sc.check_encryption()) == 1
+
+
+def test_encryption_rejects_a_version_without_a_key(monkeypatch):
+  valid_encryption_env(monkeypatch)
+  monkeypatch.setenv("ENCRYPTION_KEY_VERSION", "2")
+
+  assert len(sc.check_encryption()) == 1
+
+
+def test_encryption_rejects_an_unknown_backend(monkeypatch):
+  valid_encryption_env(monkeypatch)
+  monkeypatch.setenv("ENCRYPTION_BACKEND", "carrier-pigeon")
+
+  assert len(sc.check_encryption()) == 1  
