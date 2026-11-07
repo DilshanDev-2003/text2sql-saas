@@ -2,44 +2,60 @@
 
 ![tests](https://github.com/DilshanDev-2003/text2sql-saas/actions/workflows/tests.yml/badge.svg)
 
-A text-to-SQL system: given a natural-language question and a database schema, it generates correct SQL. It is built around a fine-tuned Llama 3.2 3B model, with a schema-validation and self-consistency layer that catches and corrects common failure modes before an answer is returned. It runs against either a static evaluation database (SQLite/Spider) or a live database (SQLAlchemy), and is served as a persistent FastAPI service with API-key and JWT/OAuth authentication.
+A text-to-SQL service: a person logs in, connects their own PostgreSQL database, asks a question in natural language, and gets back the generated SQL and its result. It is built around a fine-tuned Llama 3.2 3B model, with a schema-validation and self-consistency layer that catches and corrects common failure modes before an answer is returned, and a security-first design for handling other people's database credentials.
 
 ## Status
 
-Actively in development. The generation pipeline (fine-tuned model, schema validation, majority-vote consistency checking) is built and tested, with **67.12% execution accuracy** on the full Spider dev set. Live database connectivity, the API layer (schema endpoint, health check, request logging, rate limiting, GPU concurrency guard), API-key authentication, password signup/login with JWT, Google OAuth login, email verification, email normalization, per-IP rate limits on the account endpoints, and fail-fast startup validation are all built and covered by a 106-test suite that runs in CI on every push.
+Actively in development. The generation pipeline (fine-tuned model, schema validation, majority-vote consistency checking) reaches **67.12% execution accuracy** on the full Spider dev set. The end-to-end flow works and has been verified against a real database on a GPU: account signup and login (password and Google), email verification, per-user encrypted database connections, and SQL generation against the user's own database. A 221-test suite runs in CI on every push.
 
-**Product direction:** an end-user website where a person logs in, connects their own database, asks questions in natural language, and sees results. The backend foundations (accounts, login, the layered architecture, CI) are in place; per-user database connections and the frontend are next. The plan is to release a small, safe v1 early rather than finish every roadmap item first; see [v1 Scope](#v1-scope) and [Roadmap](#roadmap).
+Not yet built: the web frontend, a cap on result size, per-connection table allowlists, real email delivery, and production hosting. The plan is to release a small, safe v1 early rather than finish every roadmap item first; see [v1 Scope](#v1-scope) and [Roadmap](#roadmap).
 
 ## How it works
 
-1. A request reaches `POST /generate` (`app/api/routes/generate.py`). It passes the rate limiter and API-key check, then a GPU concurrency guard that rejects excess requests immediately with `503` instead of queuing them.
-2. If the question uses a known business term, its SQL meaning is injected into the prompt (`semantic_layer.py`). The schema comes from the live database, introspected once at startup.
-3. The model, loaded once at startup, generates candidate SQL.
-4. Each candidate is checked against the real schema (`schema_validation.py`), which catches hallucinated tables and columns before any query runs.
-5. Surviving candidates are executed through a pluggable executor, either against a SQLite eval file or a live database with read-only enforcement and a timeout (`query_guard.py`).
-6. The SQL whose *result* the most candidates agree on wins (self-consistency voting), and its SQL and result are returned as JSON. Failures return `422` (no valid query) or `503` (database unreachable or GPU busy).
+1. **Connect a database.** `POST /connections` validates the connection string (public hosts only, TLS required, only allowlisted parameters), opens a test connection, reads the schema, encrypts the string with AES-GCM, and saves it. The engine is kept in a bounded cache.
+2. **Ask a question.** `POST /generate` takes `{connection_id, question, n}`. It passes the rate limiter and the JWT check, confirms the connection belongs to the caller, and loads the engine and schema from the cache (rebuilding and revalidating if needed).
+3. **Generate.** A GPU concurrency guard rejects excess requests immediately with `503` instead of queuing them. The model, loaded once at startup, generates `n` candidate queries (1 to 10).
+4. **Validate and execute.** Each candidate is checked against the real schema (`schema_validation.py`), which catches hallucinated tables and columns before any query runs. Survivors run read-only with a timeout (`query_guard.py`, `statement_timeout`).
+5. **Vote.** The SQL whose *result* the most candidates agree on wins (self-consistency), and its SQL and result are returned as JSON. Failures return `422` (no valid query) or `503` (customer database unreachable or GPU busy).
 
 Every `/generate` call appends one JSON line (question, duration, status, SQL; never result rows) to the request log at `REQUEST_LOG_PATH`. Logging failures never fail a request.
 
-**Authentication:** programmatic callers use an `X-API-Key` header (keys are stored only as SHA-256 hashes). People use `POST /signup` and `POST /login` (bcrypt-hashed passwords, JWT access tokens) or Google sign-in via `GET /auth/google/login`. `GET /me` returns the authenticated user. Email addresses are normalized to lowercase at every entry point, backed by a unique index on `lower(email)`. `/signup`, `/login`, and `/auth/resend-verification` are rate limited per IP.
+## Endpoints
 
-**Email verification:** signup sends a verification email (a console backend for development; AWS SES is planned). `POST /auth/verify-email` confirms the token and `POST /auth/resend-verification` sends a new one. Google sign-in links to an existing account only when that account's email is verified; an unverified account with the same email is replaced by a fresh verified one, which prevents account pre-hijacking.
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /signup`, `POST /login` | none (rate limited) | Password accounts; returns a JWT |
+| `GET /auth/google/login`, `GET /auth/google/callback` | none | Google sign-in |
+| `POST /auth/verify-email`, `POST /auth/resend-verification` | none (resend rate limited) | Email verification |
+| `GET /me` | JWT | The authenticated user |
+| `POST /connections` | JWT, **verified email** | Add a connection (rate limited) |
+| `GET /connections`, `DELETE /connections/{id}` | JWT | List (metadata only) and remove |
+| `GET /connections/{id}/schema` | JWT | The connection's introspected schema |
+| `POST /generate` | JWT | Generate SQL and run it on the user's connection |
+| `GET /health` | none | Model and control-plane status |
 
-**Startup:** before loading the model, the server validates its configuration (required environment variables, database reachability, control-plane tables, and that the generation database is not the control plane) and fails with one readable message listing every problem.
+## Security model
+
+- **Credentials at rest.** Connection strings are encrypted with AES-GCM, bound to the owning user, with key versioning for rotation. They are never returned by the API and never logged. A KMS-backed key store is planned.
+- **Outbound safety (SSRF).** Users supply hostnames, so every connection string passes one validator: PostgreSQL only; TLS required; only `sslmode` and `channel_binding` accepted as parameters (libpq would otherwise honor `host=`, `options=`, and certificate paths); every resolved address must be public (private, loopback, link-local, and metadata ranges are rejected, including IPv4-mapped IPv6); and the engine connects to the *validated address*, which defeats DNS rebinding. Error messages never include the connection string.
+- **Query safety.** Only plain `SELECT` statements run (`query_guard.py`), with a statement timeout and read-only sessions by default. The real boundary is a read-only database role, which users are asked to create for this product; a per-connection table allowlist is planned.
+- **Accounts.** bcrypt password hashing, short-lived JWTs, email verification required before connecting a database, no account enumeration on login or resend, lowercase email normalization with a database-level unique index, and protection against account pre-hijacking when linking Google sign-in. Signup, login, resend, and connection creation are rate limited.
+- **Known limits.** `sslmode=require` encrypts but does not verify the server certificate; result rows are not yet capped; rate limits are per IP and in memory; the encryption key lives in the environment.
 
 ## Project structure
 
 ```
 app/
-├── core/       config, rate_limit, request_logger, startup_checks, email_sender
-├── auth/       security (hashing, JWT, tokens), emails (normalization), dependencies (API key / user),
-│               routes, verification, oauth, oauth_routes, users
-├── db/         connection (engine + schema introspection), runner (execution), query_guard (read-only)
-├── services/   model_loader, model_utils, schema_validation, semantic_layer, inference
-├── api/        routes/{generate,schema,health}.py, schemas.py
+├── core/       config, encryption, rate_limit, request_logger, startup_checks, email_sender
+├── auth/       security, emails, dependencies, routes, verification, oauth, oauth_routes, users
+├── db/         connection (engines, schema introspection), connection_safety (SSRF validation),
+│               runner (execution), query_guard (read-only)
+├── services/   model_loader, model_utils, schema_validation, semantic_layer, inference,
+│               connections (create/list/delete/get engine), connection_cache
+├── api/        routes/{generate,connections,health}.py, schemas.py, errors.py
 └── main.py     app composition: lifespan, middleware, routers
-scripts/        create_key.py, eval/ (offline evaluation tooling)
-migrations/     001_control_plane.sql, 002_email_verification.sql, 003_lowercase_emails.sql
+scripts/        create_key.py (legacy API keys), eval/ (offline evaluation tooling)
+migrations/     001_control_plane, 002_email_verification, 003_lowercase_emails, 004_db_connections
 .github/workflows/tests.yml   CI: runs the test suite on every push and pull request
 conftest.py     hermetic test environment (fake secrets, pinned limits, limiter reset)
 test_*.py       test suite (run from the project root)
@@ -47,47 +63,41 @@ test_*.py       test suite (run from the project root)
 
 | Layer | Responsibility |
 |---|---|
-| `app/core` | Cross-cutting concerns with no business logic: configuration from environment variables, rate limiting, request logging, startup validation, the email-sending interface. |
-| `app/auth` | Everything about identity. `security.py` and `emails.py` hold pure functions with no database or web framework; `dependencies.py` holds the database-backed lookups and FastAPI dependencies. |
-| `app/db` | Database access only: engines, schema introspection, safe execution, read-only enforcement. |
-| `app/services` | Product logic: model loading, prompting, schema validation, semantic layer, generation strategies. |
-| `app/api` | Thin FastAPI route handlers. |
+| `app/core` | Cross-cutting concerns with no business logic: configuration, encryption, rate limiting, request logging, startup validation, the email-sending interface. |
+| `app/auth` | Everything about identity. `security.py` and `emails.py` are pure functions; `dependencies.py` holds the database-backed lookups and FastAPI dependencies. |
+| `app/db` | Database access only: engines, schema introspection, connection-string safety, safe execution, read-only enforcement. |
+| `app/services` | Product logic: model loading, prompting, schema validation, generation strategies, and the connection service and cache. |
+| `app/api` | Thin FastAPI route handlers and the mapping from service errors to HTTP status codes. |
 
-`scripts/eval/` holds the full-dev-set evaluation tooling (checkpointed eval loop, re-scoring, failure analysis, manual-review sampler) and is deliberately outside `app/`, since the running API never imports it. Model training lives in a separate Colab notebook (GPU required). See `NOTES.md` for the full development history.
+`scripts/eval/` holds the full-dev-set evaluation tooling and is deliberately outside `app/`, since the running API never imports it. API-key authentication code remains (`require_api_key`, `create_key.py`) but no route currently uses it; per-user API keys may return later. Model training lives in a separate Colab notebook (GPU required). See `NOTES.md` for the full development history.
 
 ## Setup
 
-Local development (tests, auth, schema work; no GPU needed):
+Local development (tests, accounts, connections; no GPU needed):
 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
 ```
 
-`requirements.txt` does not install PyTorch (install it separately; CI uses the CPU wheel). Fill in `.env`. The main variables:
+`requirements.txt` does not install PyTorch (install it separately; CI uses the CPU wheel). Fill in `.env`:
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | The database the model queries (a customer database, **not** the control plane) |
-| `CONTROL_PLANE_DATABASE_URL` | Your own database for users, API keys, OAuth identities, and verification tokens |
-| `JWT_SECRET`, `SESSION_SECRET` | Separate signing secrets, at least 32 characters (generate each with `python -c "import secrets; print(secrets.token_urlsafe(32))"`) |
+| `CONTROL_PLANE_DATABASE_URL` | Your own database for users, connections, and verification tokens |
+| `JWT_SECRET`, `SESSION_SECRET` | Separate signing secrets, at least 32 characters (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) |
+| `ENCRYPTION_BACKEND`, `ENCRYPTION_KEYS`, `ENCRYPTION_KEY_VERSION` | Connection-string encryption. Generate a key with `python -c "import os, base64; print('1:' + base64.b64encode(os.urandom(32)).decode())"`. Back it up: losing it makes saved connections unreadable. Everything sharing a control-plane database must use the same key |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google OAuth client (optional `GOOGLE_REDIRECT_URI`) |
 | `HF_TOKEN` | Hugging Face token (the base model is gated) |
 | `WANDB_API_KEY` | Optional, for eval logging |
-| `EMAIL_BACKEND` | Email delivery backend; defaults to `console` (development only: it logs verification links) |
+| `EMAIL_BACKEND` | Defaults to `console` (development only: it logs verification links) |
 | `FRONTEND_URL` | Base URL used in verification links |
-| `REQUEST_LOG_PATH` | File for `/generate` request logs; defaults to `logs/request_log.jsonl` (set it to a Drive path on Colab) |
-| `RATE_LIMIT_GENERATE`, `RATE_LIMIT_SCHEMA`, `RATE_LIMIT_SIGNUP`, `RATE_LIMIT_LOGIN`, `RATE_LIMIT_RESEND`, `MAX_CONCURRENT_GENERATIONS` | Optional tuning (defaults: 10/minute, 60/minute, 10/hour, 10/minute, 5/hour, 1) |
+| `REQUEST_LOG_PATH` | Request log file; defaults to `logs/request_log.jsonl` (set to a Drive path on Colab) |
+| `RATE_LIMIT_GENERATE`, `RATE_LIMIT_SIGNUP`, `RATE_LIMIT_LOGIN`, `RATE_LIMIT_RESEND`, `RATE_LIMIT_CONNECTIONS_CREATE`, `RATE_LIMIT_CONNECTIONS`, `MAX_CONCURRENT_GENERATIONS` | Optional tuning (defaults: 10/minute, 10/hour, 10/minute, 5/hour, 10/hour, 60/minute, 1) |
 
-Create the control-plane schema by running the files in `migrations/` in order (`001`, `002`, `003`) against the control-plane database. Then issue an API key:
+Run the files in `migrations/` in order (`001` to `004`) against the control-plane database.
 
-```bash
-python scripts/create_key.py "Tenant Name"
-```
-
-The key is printed once and only its hash is stored.
-
-To test authentication without a GPU, skip model loading (this also skips the startup checks):
+To exercise accounts and connections without a GPU, skip model loading (this also skips the startup checks):
 
 ```bash
 SKIP_MODEL_LOAD=1 uvicorn app.main:app --port 8000
@@ -100,7 +110,7 @@ $env:SKIP_MODEL_LOAD = "1"
 uvicorn app.main:app --port 8000
 ```
 
-Serving the model needs a GPU with enough VRAM and currently runs on Colab (local hardware is insufficient). In a Colab notebook: clone the repo, `pip install -r requirements-colab.txt`, load the variables above from Colab Secrets into `os.environ`, then run `uvicorn app.main:app --host 0.0.0.0 --port 8000` (expose it with `ngrok` for external testing). The code is environment-agnostic, so moving to a dedicated GPU host needs no code changes.
+Serving the model needs a GPU and currently runs on Colab. In a notebook: `%cd /content`, clone the repo, `pip install -r requirements-colab.txt`, load the variables above from Colab Secrets into `os.environ` (with the **same** `ENCRYPTION_KEYS` as local), then run `uvicorn app.main:app --host 0.0.0.0 --port 8000`. At startup the server validates its configuration (required variables, encryption setup, control-plane tables) and fails with one message listing every problem, before loading the model.
 
 ## Running tests
 
@@ -108,11 +118,11 @@ Serving the model needs a GPU with enough VRAM and currently runs on Colab (loca
 pytest -v
 ```
 
-106 tests covering schema validation, query execution, the read-only guard, inference orchestration (with model generation mocked, so no GPU is needed), the semantic layer, all API routes including rate-limit and GPU-busy paths, authentication (signup, login, JWT, OAuth with Google mocked), email verification and normalization, request logging, and startup validation. The suite is hermetic: `conftest.py` supplies fake secrets and pins configuration, so it behaves the same on a laptop and in CI, where GitHub Actions runs it on every push and pull request on a clean Linux machine.
+221 tests covering schema validation, query execution and the read-only guard, inference orchestration (model generation mocked, so no GPU is needed), the semantic layer, every API route including rate-limit and GPU-busy paths, authentication (signup, login, JWT, Google OAuth mocked), email verification and normalization, encryption, connection-string safety, the connection service and cache, request logging, and startup validation. The suite is hermetic: `conftest.py` supplies fake secrets and pins configuration, so it behaves the same on a laptop and in CI.
 
 ## Evaluation methodology
 
-Accuracy is measured by **execution accuracy**: the generated SQL and the gold SQL are both run against the real database, and their *results* are compared, not the raw SQL text, and not sensitive to which order the SELECT columns came back in. This catches cases where differently written SQL produces the same correct answer, and cases where similar-looking SQL produces a wrong one.
+Accuracy is measured by **execution accuracy**: the generated SQL and the gold SQL are both run against the real database, and their *results* are compared, not the raw SQL text, and not sensitive to the order of the SELECT columns.
 
 Evaluated against the full [Spider](https://yale-lily.github.io/spider) text-to-SQL benchmark dev set (1034 examples).
 
@@ -122,34 +132,36 @@ Evaluated against the full [Spider](https://yale-lily.github.io/spider) text-to-
 | 50-example sample (+ validation + voting) | 72.00% |
 | **Full 1034-example dev set (checkpoint-270)** | **67.12%** |
 
-The full-dataset number is the trustworthy baseline; small samples turned out to be optimistic. Spider schemas are small, so this benchmark says little about large real-world databases. See `NOTES.md` (Phase 14) for the failure-pattern analysis and a real bug in the evaluation comparison logic that was found and fixed along the way.
+The full-dataset number is the trustworthy baseline; small samples turned out to be optimistic. Spider schemas are small, so this benchmark says little about large real-world databases. See `NOTES.md` (Phase 14) for the failure-pattern analysis and a real bug in the evaluation comparison that was found and fixed.
 
 ## v1 Scope
 
-The plan is to release a small, safe v1 early, learn from real use, and keep building in parallel with other work, rather than finishing every roadmap item first. Because users will hand over database credentials, the security items below are launch requirements, not polish.
+The plan is to release a small, safe v1 early, learn from real use, and keep building in parallel with other work. Because users hand over database credentials, the security items are launch requirements, not polish.
 
 ### Required for v1
-- [x] Accounts: password signup/login (JWT), Google sign-in, email verification (console email backend)
-- [x] Lowercase email normalization
-- [x] Rate limits on `/signup` and `/login` (per IP)
-- [x] CI: automated `pytest` on every push
-- [ ] `db_connections`: encrypted credentials, one engine per connection (cached), gated behind a verified email
-- [ ] Read-only database role (users create it for the product) and a per-connection table allowlist
-- [ ] Large-schema handling: the table allowlist plus a prompt-size guard with a clear error. RAG schema retrieval joins v1 only if alpha databases exceed that limit; otherwise it is the first post-v1 item
+- [x] Accounts: password signup/login (JWT), Google sign-in, email verification
+- [x] Lowercase email normalization, rate limits on `/signup` and `/login`, CI
+- [x] Per-user database connections: encrypted credentials, SSRF-safe validation, cached engines, verified-email gate
+- [x] `/generate` against the user's own connection (verified end to end on a GPU)
+- [ ] Cap on result rows returned from customer databases
+- [ ] Read-only database role guidance and a per-connection table allowlist
+- [ ] Large-schema handling: the table allowlist plus a prompt-size guard with a clear error (RAG schema retrieval only if alpha databases exceed that limit)
 - [ ] Minimal frontend: login, connect a database, ask a question, see **the generated SQL together with the result**
 - [ ] Accuracy limits disclosed to users (67% execution accuracy on the Spider benchmark)
 - [ ] Real email delivery (AWS SES) or invite-only signup
 - [ ] Deployment: always-available GPU model hosting, HTTPS, monitoring
 
 ### Hardening before the public stage
-- [ ] Per-account throttling of failed logins (progressive delay, not hard lockout)
-- [ ] Equalize `/login` timing for unknown emails (dummy password hash check)
-- [ ] Startup checks that refuse the console email backend and short secrets in deployed environments
+- [ ] KMS-backed encryption keys
+- [ ] Rate limits keyed by user instead of IP; shared rate-limit store for multiple instances
+- [ ] Per-account login throttling; equalize `/login` timing for unknown emails
+- [ ] Connection-pooler support (per-transaction settings instead of startup options)
+- [ ] Startup checks refusing the console email backend and short secrets in deployed environments
 - [ ] Log retention policy and privacy statement (request logs contain questions and generated SQL)
-- [ ] Production proxy settings so rate limits see real client IPs
+- [ ] Production proxy settings so rate limits see real client IPs; egress rules blocking private ranges
 
 ### After v1
-Second contrastive-training round, RAG schema retrieval (if not needed sooner), multi-dialect SQL, billing and metering, GitHub login, query history, account/usage page, shared rate-limit store, Alembic migrations, static type checking.
+Second contrastive-training round, RAG schema retrieval (if not needed sooner), multi-dialect SQL, billing and metering, GitHub login, query history, account page, Alembic migrations, static type checking.
 
 ### Release stages
 1. **Private alpha:** a handful of people I know, free, using sample or non-production copies of their data.
@@ -158,46 +170,25 @@ Second contrastive-training round, RAG schema retrieval (if not needed sooner), 
 
 ## Roadmap
 
-Built incrementally, driven by need rather than upfront completeness.
-
 ### Generation Quality
-- [x] Fine-tuned base model
-- [x] Execution-accuracy evaluation harness
-- [x] Schema validation (pre-execution hallucination guard)
-- [x] Self-consistency (majority-vote) generation
-- [x] Semantic layer (business terminology to SQL mapping)
-- [ ] Second contrastive-training round targeting the failure patterns found in the full-eval manual review (missing joins, negation, schema confusion, stat-column misinterpretation, case sensitivity)
-- [ ] RAG-based schema retrieval for large schemas (required for v1 only if alpha schemas exceed the prompt-size limit)
-- [ ] A large-schema test set (Spider's schemas are too small to show retrieval's benefit)
+- [x] Fine-tuned base model, execution-accuracy harness, schema validation, self-consistency voting, semantic layer
+- [ ] Second contrastive-training round targeting the failure patterns from the full-eval manual review (missing joins, negation, schema confusion, stat-column misinterpretation, case sensitivity)
+- [ ] RAG-based schema retrieval for large schemas; a large-schema test set
 - [ ] Multi-dialect SQL support beyond Postgres
 
 ### Accounts and Security
-- [x] API-key authentication (hashed, constant-time verification)
-- [x] Password signup/login with JWT
-- [x] Google OAuth login
-- [x] Fail-fast startup validation
-- [x] Email verification (console email backend; SES backend still to do)
-- [x] Lowercase email normalization (application layer plus unique index on `lower(email)`)
-- [x] Rate limiting on `/signup` and `/login` (per IP)
-- [ ] SES email backend
-- [ ] Per-user database connections: credentials stored encrypted, engines created per connection and cached
-- [ ] Encrypted secrets storage for user-supplied database credentials (KMS-style)
-- [ ] Read-only database role and per-connection table allowlists for the generation connection
-- [ ] Per-account login throttling and `/login` timing equalization
-- [ ] Static type checking (pyright/mypy)
-- [ ] GitHub login
+- [x] API-key authentication (retained, currently unused by routes), password signup/login with JWT, Google OAuth, email verification, email normalization, rate limiting on account endpoints
+- [x] Encrypted per-user connections with SSRF-safe validation; fail-fast startup validation
+- [ ] SES email backend; KMS encryption backend
+- [ ] Table allowlists and read-only role guidance; result row cap
+- [ ] Per-account login throttling and timing equalization
+- [ ] Static type checking; GitHub login
 
 ### Deployment Readiness
-- [x] Live database connectivity (SQLAlchemy, any engine)
-- [x] Model serving as a persistent API service
-- [x] API layer: schema endpoint, error handling (422/503), real health check, request logging, rate limiting, GPU concurrency guard
-- [x] CI with automated tests (GitHub Actions)
-- [ ] Shared rate-limit store (DynamoDB or Redis) for multi-instance deployment
-- [ ] Versioned database migrations with Alembic
+- [x] Live database connectivity, persistent model serving, request logging, rate limiting, GPU concurrency guard, CI
+- [ ] Shared rate-limit store (DynamoDB or Redis); Alembic migrations
 - [ ] Usage metering and billing
 - [ ] Deployment infrastructure (hosting, uptime, scaling)
 
 ### Product Surface
-- [ ] Frontend web interface: login, connect-a-database flow, query input, results view
-- [ ] Query history
-- [ ] Account and usage page
+- [ ] Frontend web interface; query history; account and usage page

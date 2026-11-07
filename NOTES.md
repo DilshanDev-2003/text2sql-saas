@@ -1052,3 +1052,25 @@ The full v1 checklist lives in the README under "v1 Scope".
 - Rate limits keyed by user instead of IP (still per IP today); pooler support via `SET LOCAL`.
 - Confirm `cryptography` is in both requirements files and CI stays green after the push.
 - README refresh after 6b.
+
+## 35. Step 6b: Startup Without a Fixed Generation Database, and the First End-to-End Run
+
+**Changes.** `lifespan` now validates environment, then encryption plus the control-plane tables, then loads the model (cheap to slow, as before). The fixed generation database is gone: no `DATABASE_URL`, no `app.state.engine / live_schema / dialect`. The two schema checks (empty schema, "generation DB must not be the control plane") were removed because they guarded a database that no longer exists; the equivalent protection now happens per connection at connect time (the service rejects a database with no tables). The required-table list grew to include `oauth_identities`, `email_verifications`, and `db_connections`, so an unmigrated server refuses to start with a clear list.
+
+**`check_encryption` never prints exception text.** Parsing `ENCRYPTION_KEYS` calls `int()` on the part before the colon, so a key pasted without its `1:` prefix produces `invalid literal for int() ... '<the whole key>'`, which would write the key into the logs. The check reports only the exception's class name, plus a format hint, and does a real encrypt-and-decrypt round trip so a broken cipher setup fails at startup instead of on a user's first save. A test fails if anyone later prints the exception text. Suite: 3 tests removed, 5 added, 221 total. One surviving test deleted `DATABASE_URL`, a variable no longer required, which would have raised `KeyError` in `monkeypatch.delenv`.
+
+**First end-to-end run on Colab (GPU).** Fresh clone, secrets from Colab Secrets, server started from the new entry point, then: login, list connections, `POST /generate` with `n=5` on the Neon connection saved earlier from the laptop. Result: `200`, `SELECT AVG(age) FROM singer WHERE country = 'France'`, result 29; an unknown connection id returned `404`. This confirms the whole path (JWT, ownership check, decryption with a key shared across environments, SSRF validation and pinned address, TLS to the customer database, schema introspection, generation, voting, read-only execution).
+
+**What went wrong on the way, and the lessons:**
+1. **A stale clone.** The server failed with `Missing environment variable: DATABASE_URL`, a check the new code no longer has, and the traceback path was doubled (`/content/text2sql-saas/text2sql-saas/...`). `%cd` persists across Colab cells, so re-running a clone cell cloned inside the old folder. Fix: start the cell with `%cd /content`, clone, then verify with `git log --oneline -3` and a `grep` for the removed variable.
+2. "Process alive: True" printed just before a startup crash finished. Read the **top** of `server.log` (`head`), where startup failures list every problem, not only the tail.
+3. `KeyError: 'access_token'` came from indexing the login response without checking it; the cause was very likely a mistyped email (`example.com` vs `examplex.com`). Call `raise_for_status()` first.
+4. Never paste a password into a cell; use `getpass`.
+
+**Not yet verified live (unit-tested only):** a second user being refused another user's connection, cache-hit timing, concurrent requests, and the pooler-string failure message.
+
+**Carried forward, in suggested order:**
+1. **Result row cap**: `execute_live` fetches all rows, so a query on a large table can exhaust memory and produce a huge response (cap, `truncated` flag, and apply to every voting candidate).
+2. Per-connection **table allowlist**, read-only role guidance, and a **prompt-size guard** for large schemas.
+3. Minimal frontend (SQL shown beside the result), SES, hosting research.
+4. Hardening list in the README (KMS keys, per-user rate limits, pooler support, login throttling and timing, deployed-environment startup checks, log retention policy, proxy and egress settings).
