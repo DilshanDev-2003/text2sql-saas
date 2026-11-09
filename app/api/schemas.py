@@ -8,6 +8,7 @@ class GenerateRequest(BaseModel):
 class GenerateResponse(BaseModel):
   sql: str
   result: list | None
+  truncated: bool = False
 
 class CreateConnectionRequest(BaseModel):
   name: str

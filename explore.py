@@ -265,7 +265,7 @@ password = "Dilshan161218"
 r = requests.post(f"{base}/signup", json={"email": email, "password": password})
 print(r.status_code)
 
-"""
+
 import requests
 
 base = "http://localhost:8000"
@@ -287,4 +287,20 @@ for body in [
 
 print(requests.get(f"{base}/connections", headers=headers).json())
 
+"""
 
+import time
+from getpass import getpass
+
+from app.db.connection import build_customer_engine
+from app.db.connection_safety import validate_connection_string
+from app.db.runner import execute_live
+
+target = validate_connection_string(getpass("postgresql://neondb_owner:npg_sKCJ7i3qnXBT@ep-billowing-wildflower-b3syyenv.c-4.ap-southeast-1.aws.neon.tech/customer_test?sslmode=require&channel_binding=require"))
+engine = build_customer_engine(target)
+
+started = time.time()
+out = execute_live(engine, "SELECT g, md5(g::text) FROM generate_series(1, 1000) g")
+print(out["ok"], len(out.get("rows", [])), out.get("truncated"), round(time.time() - started, 2), "s")
+
+print(execute_live(engine, "DELETE FROM singer"))

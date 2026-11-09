@@ -87,3 +87,10 @@ def get_encryption_keys() -> dict[int, bytes]:
 
 def get_encryption_key_version() -> int:
   return int(get_required_env("ENCRYPTION_KEY_VERSION"))
+
+# The capped reader
+def get_max_result_rows() -> int:
+  return int(os.environ.get("MAX_RESULT_ROWS", "1000"))
+
+def get_max_result_bytes() -> int:
+  return int(os.environ.get("MAX_RESULT_BYTES", "2000000"))

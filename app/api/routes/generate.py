@@ -93,4 +93,4 @@ async def generate(
       )
 
     log_request(req.question, req.n, duration, 200, sql=output["sql"])
-    return GenerateResponse(sql=output["sql"], result=output["result"])
+    return GenerateResponse(sql=output["sql"], result=output["result"], truncated=output.get("truncated", False),)

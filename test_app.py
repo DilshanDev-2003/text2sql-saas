@@ -34,7 +34,7 @@ def test_generate_success_uses_the_connections_engine_and_schema(client):
     r = client.post("/generate", json=BODY)
 
   assert r.status_code == 200
-  assert r.json() == OUTPUT
+  assert r.json() == {**OUTPUT, "truncated": False}
   kwargs = generate.call_args.kwargs
   assert kwargs["live_schema"] == {"singer": {}}
   assert kwargs["dialect"] == "postgres"
@@ -144,3 +144,11 @@ def test_generate_is_rate_limited(client):
 
   assert statuses[:10] == [200] * 10
   assert statuses[10] == 429
+
+def test_generate_reports_truncated_results(client):
+  output = {**OUTPUT, "truncated": True}
+  with patch("app.api.routes.generate.generate_sql_final", return_value=output):
+    r = client.post("/generate", json=BODY)
+
+  assert r.status_code == 200
+  assert r.json()["truncated"] is True  

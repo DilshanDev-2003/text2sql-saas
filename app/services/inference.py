@@ -81,7 +81,7 @@ def generate_candidates(model, tokenizer, question, db_id, schema_lookup, db_pat
 
           result = run(sql)
           if result["ok"]:
-             candidates.append({"sql": sql, "result": result["rows"]})
+             candidates.append({"sql": sql, "result": result["rows"], "truncated": result.get("truncated", False),})
           else:
              failure_reasons.append(result.get("error_type", "query_error"))
         else:
@@ -93,18 +93,17 @@ def voting_candidates(candidates):
   if not candidates:
     return None
 
-  def normalize(result):
-    return tuple(sorted(str(v) for v in row) for row in sorted(tuple(sorted(str(v) for v in row)) for row in result))
-
-  # simpler, equivalent: build each row's signature once, reuse it
   def row_signature(result):
     return tuple(sorted(tuple(sorted(str(v) for v in row)) for row in result))
 
-  result_counts = Counter(row_signature(c["result"]) for c in candidates)
-  most_common_result, count = result_counts.most_common(1)[0]
+  def vote_key(candidate):
+    return (row_signature(candidate["result"]), candidate.get("truncated", False))
+
+  result_counts = Counter(vote_key(c) for c in candidates)
+  most_common_key, _ = result_counts.most_common(1)[0]
 
   for c in candidates:
-    if row_signature(c["result"]) == most_common_result:
+    if vote_key(c) == most_common_key:
       return c
 
   return None    
