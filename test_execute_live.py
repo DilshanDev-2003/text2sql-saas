@@ -79,7 +79,21 @@ def test_timeout_returns_promptly():
   connection.execute.side_effect = lambda *args, **kwargs: time.sleep(1)
 
   started = time.monotonic()
-  out = execute_live(engine, "SELECT 1", timeout_seconds=0.1)
+  out = execute_live(engine, "SELECT 1", timeout_seconds=0.1, connect_allowance_seconds=0)
 
   assert out["error_type"] == "timeout"
   assert time.monotonic() - started < 0.5
+
+def test_slow_connection_gets_the_extra_allowance():
+  engine, connection, _ = fake_engine()
+
+  def slow_connect(*args, **kwargs):
+    time.sleep(0.3)
+    return MagicMock()
+
+  connection.execute.side_effect = slow_connect
+
+  with patch("app.db.runner.read_capped", return_value=CappedRows([(1,)], False)):
+    out = execute_live(engine, "SELECT 1", timeout_seconds=0.1, connect_allowance_seconds=2)
+
+  assert out["ok"] is True  

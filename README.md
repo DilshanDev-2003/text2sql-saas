@@ -94,6 +94,8 @@ cp .env.example .env
 | `FRONTEND_URL` | Base URL used in verification links |
 | `REQUEST_LOG_PATH` | Request log file; defaults to `logs/request_log.jsonl` (set to a Drive path on Colab) |
 | `RATE_LIMIT_GENERATE`, `RATE_LIMIT_SIGNUP`, `RATE_LIMIT_LOGIN`, `RATE_LIMIT_RESEND`, `RATE_LIMIT_CONNECTIONS_CREATE`, `RATE_LIMIT_CONNECTIONS`, `MAX_CONCURRENT_GENERATIONS` | Optional tuning (defaults: 10/minute, 10/hour, 10/minute, 5/hour, 10/hour, 60/minute, 1) |
+| `MAX_RESULT_ROWS` | defaults 1000 rows |
+| `MAX_RESULT_BYTES` | defaults 2 MB |
 
 Run the files in `migrations/` in order (`001` to `004`) against the control-plane database.
 
@@ -118,7 +120,7 @@ Serving the model needs a GPU and currently runs on Colab. In a notebook: `%cd /
 pytest -v
 ```
 
-221 tests covering schema validation, query execution and the read-only guard, inference orchestration (model generation mocked, so no GPU is needed), the semantic layer, every API route including rate-limit and GPU-busy paths, authentication (signup, login, JWT, Google OAuth mocked), email verification and normalization, encryption, connection-string safety, the connection service and cache, request logging, and startup validation. The suite is hermetic: `conftest.py` supplies fake secrets and pins configuration, so it behaves the same on a laptop and in CI.
+243 tests covering schema validation, query execution and the read-only guard, inference orchestration (model generation mocked, so no GPU is needed), the semantic layer, every API route including rate-limit and GPU-busy paths, authentication (signup, login, JWT, Google OAuth mocked), email verification and normalization, encryption, connection-string safety, the connection service and cache, request logging, and startup validation. The suite is hermetic: `conftest.py` supplies fake secrets and pins configuration, so it behaves the same on a laptop and in CI.
 
 ## Evaluation methodology
 
@@ -143,7 +145,7 @@ The plan is to release a small, safe v1 early, learn from real use, and keep bui
 - [x] Lowercase email normalization, rate limits on `/signup` and `/login`, CI
 - [x] Per-user database connections: encrypted credentials, SSRF-safe validation, cached engines, verified-email gate
 - [x] `/generate` against the user's own connection (verified end to end on a GPU)
-- [ ] Cap on result rows returned from customer databases
+- [x] Cap on result rows returned from customer databases.
 - [ ] Read-only database role guidance and a per-connection table allowlist
 - [ ] Large-schema handling: the table allowlist plus a prompt-size guard with a clear error (RAG schema retrieval only if alpha databases exceed that limit)
 - [ ] Minimal frontend: login, connect a database, ask a question, see **the generated SQL together with the result**

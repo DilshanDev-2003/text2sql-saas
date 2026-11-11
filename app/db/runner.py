@@ -17,7 +17,7 @@ def execute_queries(db_path, query, timeout_seconds=5):
   conn.close()
   return results
 
-def execute_live(engine, query, timeout_seconds=5, readonly=True):
+def execute_live(engine, query, timeout_seconds=5, readonly=True, connect_allowance_seconds=10):
   if readonly:
     try:
       guard_readonly(query)
@@ -35,7 +35,7 @@ def execute_live(engine, query, timeout_seconds=5, readonly=True):
   executor = ThreadPoolExecutor(max_workers=1)
   future = executor.submit(_run)
   try:
-    capped = future.result(timeout=timeout_seconds)
+    capped = future.result(timeout=timeout_seconds + connect_allowance_seconds)
     return {"ok": True, "rows": capped.rows, "truncated": capped.truncated}
   except FutureTimeoutError:
     return {"ok": False, "error_type": "timeout", "error": "query_timeout"}

@@ -1074,3 +1074,39 @@ The full v1 checklist lives in the README under "v1 Scope".
 2. Per-connection **table allowlist**, read-only role guidance, and a **prompt-size guard** for large schemas.
 3. Minimal frontend (SQL shown beside the result), SES, hosting research.
 4. Hardening list in the README (KMS keys, per-user rate limits, pooler support, login throttling and timing, deployed-environment startup checks, log retention policy, proxy and egress settings).
+
+## 36. Result Row Cap, Streaming, and Live-Execution Fixes
+
+**Problem:** `execute_live` fetched every row, so a query on a big table could exhaust memory and produce a huge response (and `n` candidates multiply it).
+
+**Design.**
+- **Streaming (server-side) cursor** (`execution_options(stream_results=True)`): with the default cursor the driver loads the whole result into memory when the query executes, and `fetchmany` only slices it, so a cap alone doesn't help.
+- `read_capped` (`app/db/result_limits.py`): caps **rows** (default 1000) and **bytes** (default 2 MB, estimated with `len(repr(row))`), reads in batches, fetches one row past the cap to know whether to set `truncated`, and stops early without draining the cursor. One oversized row yields an empty, truncated result. Limits come from `MAX_RESULT_ROWS` and `MAX_RESULT_BYTES`.
+- The flag travels executor, candidate, vote, `/generate` response (`truncated`). **Truncated and complete results never vote together.** Known caveat: voting compares only the kept rows, and a query without `ORDER BY` may keep different rows each run.
+- Rejected: wrapping the model's SQL in `SELECT * FROM (...) LIMIT n` (rewrites the SQL, breaks on edge cases such as duplicate column names, doesn't bound bytes). Possible later optimization: add `LIMIT cap+1` with `sqlglot` only when a query has none.
+
+**Bugs found in `execute_live` while wiring this in:**
+1. The app-side timeout never returned early: `with ThreadPoolExecutor(...)` waits for its worker on exit even after a `return`. Now `shutdown(wait=False)`; the real bound on a query is the server-side `statement_timeout`.
+2. `guard_readonly` raised outside any `try`, so a model-written `DELETE` (it passes schema validation) crashed the whole request with a `500`. It is now a failed candidate (`error_type: "blocked"`) and the voting fallback applies.
+3. First query after idle exceeded the 5 s total timeout (**measured cold start: 6 to 8.5 s on Neon**), because that clock includes connecting. The timeout is now query budget plus a 10 s connection allowance.
+4. Dead code removed from `voting_candidates`.
+
+**Live verification (real Neon database):** a five-million-row query returned exactly 1000 rows with `truncated: True`; the guard blocked a `DELETE`; with the guard off, a write was refused by the database itself (`ReadOnlySqlTransaction`), and the row count stayed 4 before and after. A streaming cursor also cannot carry DML (`DECLARE CURSOR FOR DELETE` is a syntax error), an incidental extra layer.
+
+| Layer | Real boundary? |
+|---|---|
+| `guard_readonly` | Application logic |
+| Streaming cursor rejects DML | Incidental |
+| `default_transaction_read_only=on` | A session can switch it back off |
+| No commit is ever issued | Incidental |
+| **Read-only database role** | **Yes; the only layer that holds if our code has a bug** |
+
+**Measurements (laptop to a Singapore database):** plain queries 0.7 to 1.0 s; streaming 1.2 to 2.4 s; first call 6 to 8.5 s. Network distance dominates and streaming adds about 0.5 s per query on this link. Decision: keep streaming; re-measure from Colab or the deployment before adding `LIMIT` injection or parallel candidates.
+
+**Process lessons:**
+- `getpass("...")` takes a *prompt*, not a value, and Code Runner's Output panel can't accept typed input, so the script just sat waiting. Never put a connection string in code; read it from `.env`.
+- The launcher's default Python was 3.15 (no compiled `psycopg` yet) while the project runs on 3.13; use `py -3.13` (or set `PY_PYTHON`) and select the interpreter in VS Code.
+- A diagnostic that prints `len(rows)` instead of the rows hides the answer; print the values.
+- A connection string with the owner password was pasted into code and chat. Rotate it, and use a read-only role (`text2sql_readonly`) for tests.
+
+**Carried forward:** per-connection table allowlist and prompt-size guard; minimal frontend; SES; first-use connect timeout (`build_customer_engine` uses 5 s) if cold starts ever exceed it; re-measure latency from the deployment topology.
